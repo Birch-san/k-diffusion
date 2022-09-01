@@ -13,3 +13,4 @@ torchvision
 tqdm
 wandb
 git+https://github.com/openai/CLIP#egg=clip
+typing-extensions

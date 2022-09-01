@@ -7,7 +7,11 @@ import torch
 from torch import Tensor
 from torchdiffeq import odeint
 from tqdm.auto import trange, tqdm
-from typing import Optional, Callable, TypeAlias
+from typing import Optional, Callable
+try:
+    from typing import TypeAlias
+except ImportError:
+    from typing_extensions import TypeAlias
 
 from . import utils
 
