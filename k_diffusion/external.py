@@ -1,17 +1,75 @@
 import math
 
 import torch
-from torch import nn
+from torch import nn, Tensor
+from typing import Protocol, Generic, TypeVar, TYPE_CHECKING
 
 from . import sampling, utils
 
+class AbstractModel(Protocol):
+  def __call__(self, *args, **kwargs) -> Tensor: ...
 
-class VDenoiser(nn.Module):
+class DenoiserModel(AbstractModel):
+    def __call__(self, x: Tensor, t: Tensor, *args, **kwargs) -> Tensor: ...
+
+class CompVisModel(AbstractModel):
+    alphas_cumprod: Tensor
+    def apply_model(self, x: Tensor, t: Tensor, cond: Tensor) -> Tensor: ...
+
+class WrappedModelProto(AbstractModel):
+    def sigma_to_t(self, sigma: Tensor) -> Tensor: ...
+    def t_to_sigma(self, t: Tensor) -> Tensor: ...
+    def discretize_sigma(self, sigma: Tensor) -> Tensor: ...
+
+# the 'default' arg of TypeVar isn't valid at runtime, but amazingly seems to be utilised
+# at compile-time by some type-checkers
+# https://github.com/python/mypy/issues/4236#issuecomment-344660299
+if TYPE_CHECKING:
+    TModel = TypeVar('TModel', bound=AbstractModel, default=AbstractModel)
+    TDenoiserModel = TypeVar('TDenoiserModel', bound=DenoiserModel, default=DenoiserModel)
+    TCompVisModel = TypeVar('TCompVisModel', bound=CompVisModel, default=CompVisModel)
+else:
+    TModel = TypeVar('TModel', bound=AbstractModel)
+    TDenoiserModel = TypeVar('TDenoiserModel', bound=DenoiserModel)
+    TCompVisModel = TypeVar('TCompVisModel', bound=CompVisModel)
+
+class BaseModelWrapper(nn.Module, WrappedModelProto, Generic[TModel]):
+    inner_model: TModel
+
+    """The base wrapper class for the k-diffusion model wrapper idiom. Model
+    wrappers should subclass this class and customize the behavior of the
+    wrapped model by implementing or overriding methods."""
+    def __init__(self, model: TModel):
+        super().__init__()
+        self.inner_model = model
+
+    def __dir__(self):
+        return list(set(super().__dir__() + dir(self.inner_model)))
+
+    def __getattr__(self, name):
+        try:
+            return super().__getattr__(name)
+        except AttributeError:
+            return getattr(self.inner_model, name)
+
+    def forward(self, *args, **kwargs):
+        return self.inner_model(*args, **kwargs)
+    
+    def sigma_to_t(self, sigma: Tensor) -> Tensor:
+        return sigma
+    
+    def t_to_sigma(self, t: Tensor) -> Tensor:
+        return t
+    
+    def discretize_sigma(self, sigma: Tensor) -> Tensor:
+        return self.t_to_sigma(self.sigma_to_t(sigma))
+
+
+class VDenoiser(BaseModelWrapper[TDenoiserModel]):
     """A v-diffusion-pytorch model wrapper for k-diffusion."""
 
-    def __init__(self, inner_model):
-        super().__init__()
-        self.inner_model = inner_model
+    def __init__(self, model: TDenoiserModel):
+        super().__init__(model)
         self.sigma_data = 1.
 
     def get_scalings(self, sigma):
@@ -38,12 +96,12 @@ class VDenoiser(nn.Module):
         return self.inner_model(input * c_in, self.sigma_to_t(sigma), **kwargs) * c_out + input * c_skip
 
 
-class DiscreteSchedule(nn.Module):
+class DiscreteSchedule(BaseModelWrapper[TModel]):
     """A mapping between continuous noise levels (sigmas) and a list of discrete noise
     levels."""
 
-    def __init__(self, sigmas, quantize):
-        super().__init__()
+    def __init__(self, sigmas, quantize, model: TModel):
+        super().__init__(model)
         self.register_buffer('sigmas', sigmas)
         self.register_buffer('log_sigmas', sigmas.log())
         self.quantize = quantize
@@ -86,13 +144,12 @@ class DiscreteSchedule(nn.Module):
         return log_sigma.exp()
 
 
-class DiscreteEpsDDPMDenoiser(DiscreteSchedule):
+class DiscreteEpsDDPMDenoiser(DiscreteSchedule[TModel]):
     """A wrapper for discrete schedule DDPM models that output eps (the predicted
     noise)."""
 
-    def __init__(self, model, alphas_cumprod, quantize):
-        super().__init__(((1 - alphas_cumprod) / alphas_cumprod) ** 0.5, quantize)
-        self.inner_model = model
+    def __init__(self, model: TModel, alphas_cumprod, quantize):
+        super().__init__(((1 - alphas_cumprod) / alphas_cumprod) ** 0.5, quantize, model)
         self.sigma_data = 1.
 
     def get_scalings(self, sigma):
@@ -115,10 +172,10 @@ class DiscreteEpsDDPMDenoiser(DiscreteSchedule):
         return input + eps * c_out
 
 
-class OpenAIDenoiser(DiscreteEpsDDPMDenoiser):
+class OpenAIDenoiser(DiscreteEpsDDPMDenoiser[TModel]):
     """A wrapper for OpenAI diffusion models."""
 
-    def __init__(self, model, diffusion, quantize=False, has_learned_sigmas=True, device='cpu'):
+    def __init__(self, model: TModel, diffusion, quantize=False, has_learned_sigmas=True, device='cpu'):
         alphas_cumprod = torch.tensor(diffusion.alphas_cumprod, device=device, dtype=torch.float32)
         super().__init__(model, alphas_cumprod, quantize=quantize)
         self.has_learned_sigmas = has_learned_sigmas
@@ -130,22 +187,21 @@ class OpenAIDenoiser(DiscreteEpsDDPMDenoiser):
         return model_output
 
 
-class CompVisDenoiser(DiscreteEpsDDPMDenoiser):
+class CompVisDenoiser(DiscreteEpsDDPMDenoiser[TCompVisModel]):
     """A wrapper for CompVis diffusion models."""
 
-    def __init__(self, model, quantize=False, device='cpu'):
+    def __init__(self, model: TCompVisModel, quantize=False, device='cpu'):
         super().__init__(model, model.alphas_cumprod, quantize=quantize)
 
     def get_eps(self, *args, **kwargs):
         return self.inner_model.apply_model(*args, **kwargs)
 
 
-class DiscreteVDDPMDenoiser(DiscreteSchedule):
+class DiscreteVDDPMDenoiser(DiscreteSchedule[TModel]):
     """A wrapper for discrete schedule DDPM models that output v."""
 
-    def __init__(self, model, alphas_cumprod, quantize):
-        super().__init__(((1 - alphas_cumprod) / alphas_cumprod) ** 0.5, quantize)
-        self.inner_model = model
+    def __init__(self, model: TModel, alphas_cumprod, quantize):
+        super().__init__(((1 - alphas_cumprod) / alphas_cumprod) ** 0.5, quantize, model)
         self.sigma_data = 1.
 
     def get_scalings(self, sigma):
@@ -169,10 +225,10 @@ class DiscreteVDDPMDenoiser(DiscreteSchedule):
         return self.get_v(input * c_in, self.sigma_to_t(sigma), **kwargs) * c_out + input * c_skip
 
 
-class CompVisVDenoiser(DiscreteVDDPMDenoiser):
+class CompVisVDenoiser(DiscreteVDDPMDenoiser[TCompVisModel]):
     """A wrapper for CompVis diffusion models that output v."""
 
-    def __init__(self, model, quantize=False, device='cpu'):
+    def __init__(self, model: TCompVisModel, quantize=False, device='cpu'):
         super().__init__(model, model.alphas_cumprod, quantize=quantize)
 
     def get_v(self, x, t, cond, **kwargs):
