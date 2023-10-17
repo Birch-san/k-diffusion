@@ -1,0 +1,11 @@
+{
+  "model": {
+    "type": "none",
+    "input_size": [256, 256]
+  },
+  "dataset": {
+    "type": "wds",
+    "image_key": "img.png",
+    "location": "/sdb/ml-data/openai-guided-diffusion-256-classcond-unguided-samples-50k/{00000..00004}.tar"
+  }
+}

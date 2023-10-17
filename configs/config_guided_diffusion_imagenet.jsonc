@@ -1,0 +1,33 @@
+{
+  "model": {
+    "type": "guided_diffusion",
+    "config": {
+      "attention_resolutions": "32, 16, 8",
+      "class_cond": true,
+      "diffusion_steps": 1000,
+      "image_size": 256,
+      "learn_sigma": true,
+      "noise_schedule": "linear",
+      "num_channels": 256,
+      "num_head_channels": 64,
+      "num_res_blocks": 2,
+      "resblock_updown": true,
+      "use_fp16": true,
+      "use_scale_shift_norm": true,
+      "use_torch_sdp_attention": true
+    },
+    "input_channels": 3,
+    "input_size": [256, 256]
+  },
+  "dataset": {
+    // "type": "imagefolder-class",
+    "type": "wds-class",
+    // "location": "/nvme1/ml-data/ImageNet/train",
+    // "location": "/p/scratch/transfernetx/datasets/ImageNet/im-1k/train",
+    "location": "/p/fastdata/mmlaion/imagenet-1K-webdataset/train/{00000..01023}.tar",
+    "wds_image_key": "jpg",
+    "class_cond_key": "cls",
+    "num_classes": 1000,
+    "classes_to_captions": "imagenet-1k"
+  }
+}

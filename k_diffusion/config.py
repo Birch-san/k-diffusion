@@ -2,6 +2,7 @@ from functools import partial
 import json
 import math
 from pathlib import Path
+from typing import Dict, Union
 
 from jsonmerge import merge
 
@@ -20,7 +21,7 @@ def round_to_power_of_two(x, tol):
     return approxs[0]
 
 
-def load_config(path_or_dict):
+def load_config(path_or_dict: Union[str, Dict], use_json5=False):
     defaults_image_v1 = {
         'model': {
             'patch_size': 1,
@@ -112,11 +113,17 @@ def load_config(path_or_dict):
         file = Path(path_or_dict)
         if file.suffix == '.safetensors':
             metadata = utils.get_safetensors_metadata(file)
-            config = json.loads(metadata['config'])
+            json_str: str = metadata['config']
         else:
-            config = json.loads(file.read_text())
+            json_str: str = file.read_text()
+        if use_json5:
+            # json5 supports comments, like in .jsonc files
+            import json5
+            config: Dict = json5.loads(json_str)
+        else:
+            config: Dict = json.loads(json_str)
     else:
-        config = path_or_dict
+        config: Dict = path_or_dict
     if config['model']['type'] == 'image_v1':
         config = merge(defaults_image_v1, config)
     elif config['model']['type'] == 'image_transformer_v1':
@@ -185,8 +192,22 @@ def make_model(config):
         assert len(config['widths']) == len(config['d_ffs'])
         assert len(config['widths']) == len(config['self_attns'])
         assert len(config['widths']) == len(config['dropout_rate'])
+        cross_attn = config['cross_attn'] if 'cross_attn' in config else None
+        if cross_attn is None:
+            d_cross = xattn_scale_qk = xattn_dropout = None
+        else:
+            xattn_scale_qk=cross_attn.get('scale_qk', True)
+            xattn_dropout=cross_attn.get('dropout', .1)
+            match(cross_attn['encoder']):
+                case 'clip-vit-l':
+                    d_cross = 768
+                case 'phi-1-5':
+                    d_cross = 2048
+                case _:
+                    raise ValueError(f"Never heard of cross-attn encoder '{cross_attn['encoder']}'")
+        cross_attn_layers = [None]*len(config['widths']) if cross_attn is None else cross_attn['layers']
         levels = []
-        for depth, width, d_ff, self_attn, dropout in zip(config['depths'], config['widths'], config['d_ffs'], config['self_attns'], config['dropout_rate']):
+        for depth, width, d_ff, self_attn, cross_attn_layer, dropout in zip(config['depths'], config['widths'], config['d_ffs'], config['self_attns'], cross_attn_layers, config['dropout_rate']):
             if self_attn['type'] == 'global':
                 self_attn = models.image_transformer_v2.GlobalAttentionSpec(self_attn.get('d_head', 64))
             elif self_attn['type'] == 'neighborhood':
@@ -197,7 +218,16 @@ def make_model(config):
                 self_attn = models.image_transformer_v2.NoAttentionSpec()
             else:
                 raise ValueError(f'unsupported self attention type {self_attn["type"]}')
-            levels.append(models.image_transformer_v2.LevelSpec(depth, width, d_ff, self_attn, dropout))
+            if cross_attn_layer is None:
+                cross_attn_spec = None
+            else:
+                cross_attn_spec = models.image_transformer_v2.CrossAttentionSpec(
+                    d_head=cross_attn_layer.get('d_head', 64),
+                    d_cross=d_cross,
+                    scale_qk=xattn_scale_qk,
+                    dropout=xattn_dropout,
+                )
+            levels.append(models.image_transformer_v2.LevelSpec(depth, width, d_ff, self_attn, cross_attn_spec, dropout))
         mapping = models.image_transformer_v2.MappingSpec(config['mapping_depth'], config['mapping_width'], config['mapping_d_ff'], config['mapping_dropout_rate'])
         model = models.ImageTransformerDenoiserModelV2(
             levels=levels,

@@ -3,11 +3,11 @@
 from dataclasses import dataclass
 from functools import lru_cache, reduce
 import math
-from typing import Union
+from typing import Union, Optional, Sequence
 
 from einops import rearrange
 import torch
-from torch import nn
+from torch import nn, FloatTensor, BoolTensor
 import torch._dynamo
 from torch.nn import functional as F
 
@@ -153,9 +153,10 @@ class RMSNorm(nn.Module):
 
 
 class AdaRMSNorm(nn.Module):
-    def __init__(self, features, cond_features, eps=1e-6):
+    def __init__(self, features, cond_features, eps=1e-6, new_dims=2):
         super().__init__()
         self.eps = eps
+        self.new_dims = new_dims
         self.linear = apply_wd(zero_init(Linear(cond_features, features, bias=False)))
         tag_module(self.linear, "mapping")
 
@@ -163,7 +164,9 @@ class AdaRMSNorm(nn.Module):
         return f"eps={self.eps},"
 
     def forward(self, x, cond):
-        return rms_norm(x, self.linear(cond)[:, None, None, :] + 1, self.eps)
+        cond = self.linear(cond)
+        cond = cond[:, *(None,)*self.new_dims, :] + 1
+        return rms_norm(x, cond, self.eps)
 
 
 # Rotary position embeddings
@@ -467,6 +470,43 @@ class ShiftedWindowSelfAttentionBlock(nn.Module):
         return x + skip
 
 
+class CrossAttentionBlock(nn.Module):
+    qk_scale: Optional[nn.Parameter]
+    def __init__(self, d_model: int, d_cross: int, d_head: int, cond_features: int, scale_qk: bool, dropout=0.):
+        super().__init__()
+        self.d_head = d_head
+        self.dropout = dropout
+        self.n_heads = d_model // d_head
+        self.norm = AdaRMSNorm(d_model, cond_features)
+        self.q_proj = apply_wd(Linear(d_model, d_model, bias=False))
+        self.crossattn_norm = AdaRMSNorm(d_cross, cond_features, new_dims=1)
+        self.kv_proj = apply_wd(Linear(d_cross, d_model * 2, bias=False))
+        self.dropout = nn.Dropout(dropout)
+        self.qk_scale = nn.Parameter(torch.full([self.n_heads], 10.0)) if scale_qk else None
+        self.out_proj = apply_wd(zero_init(Linear(d_model, d_model, bias=False)))
+
+    def extra_repr(self):
+        return f"d_head={self.d_head},"
+
+    def forward(self, x: FloatTensor, cond: FloatTensor, crossattn_cond: FloatTensor, crossattn_mask: Optional[BoolTensor] = None):
+        skip = x
+        x = self.norm(x, cond)
+        q = self.q_proj(x)
+        crossattn_cond = self.crossattn_norm(crossattn_cond, cond)
+        kv = self.kv_proj(crossattn_cond)
+        q = rearrange(q, "n h w (nh e) -> n nh (h w) e", e=self.d_head)
+        k, v = rearrange(kv, "n l (t nh e) -> t n nh l e", t=2, e=self.d_head)
+        if self.qk_scale is not None:
+            q, k = scale_for_cosine_sim(q, k, self.qk_scale[:, None, None], 1e-6)
+        # broadcast masked keys over every head and every query
+        crossattn_mask = rearrange(crossattn_mask, "n l -> n 1 1 l")
+        x = F.scaled_dot_product_attention(q, k, v, attn_mask=crossattn_mask)
+        x = rearrange(x, "n nh (h w) e -> n h w (nh e)", h=skip.shape[-3], w=skip.shape[-2])
+        x = self.dropout(x)
+        x = self.out_proj(x)
+        return x + skip
+
+
 class FeedForwardBlock(nn.Module):
     def __init__(self, d_model, d_ff, cond_features, dropout=0.0):
         super().__init__()
@@ -485,38 +525,47 @@ class FeedForwardBlock(nn.Module):
 
 
 class GlobalTransformerLayer(nn.Module):
-    def __init__(self, d_model, d_ff, d_head, cond_features, dropout=0.0):
+    def __init__(self, d_model, d_ff, d_head, cond_features, cross_attn: Optional[CrossAttentionBlock] = None, dropout=0.0):
         super().__init__()
         self.self_attn = SelfAttentionBlock(d_model, d_head, cond_features, dropout=dropout)
+        self.cross_attn = cross_attn
         self.ff = FeedForwardBlock(d_model, d_ff, cond_features, dropout=dropout)
 
-    def forward(self, x, pos, cond):
+    def forward(self, x, pos, cond, crossattn_cond: Optional[FloatTensor] = None, crossattn_mask: Optional[BoolTensor] = None):
         x = checkpoint(self.self_attn, x, pos, cond)
+        if self.cross_attn is not None:
+            x = checkpoint(self.cross_attn, x, cond, crossattn_cond, crossattn_mask)
         x = checkpoint(self.ff, x, cond)
         return x
 
 
 class NeighborhoodTransformerLayer(nn.Module):
-    def __init__(self, d_model, d_ff, d_head, cond_features, kernel_size, dropout=0.0):
+    def __init__(self, d_model, d_ff, d_head, cond_features, kernel_size, cross_attn: Optional[CrossAttentionBlock] = None, dropout=0.0):
         super().__init__()
         self.self_attn = NeighborhoodSelfAttentionBlock(d_model, d_head, cond_features, kernel_size, dropout=dropout)
+        self.cross_attn = cross_attn
         self.ff = FeedForwardBlock(d_model, d_ff, cond_features, dropout=dropout)
 
-    def forward(self, x, pos, cond):
+    def forward(self, x, pos, cond, crossattn_cond: Optional[FloatTensor] = None, crossattn_mask: Optional[BoolTensor] = None):
         x = checkpoint(self.self_attn, x, pos, cond)
+        if self.cross_attn is not None:
+            x = checkpoint(self.cross_attn, x, cond, crossattn_cond, crossattn_mask)
         x = checkpoint(self.ff, x, cond)
         return x
 
 
 class ShiftedWindowTransformerLayer(nn.Module):
-    def __init__(self, d_model, d_ff, d_head, cond_features, window_size, index, dropout=0.0):
+    def __init__(self, d_model, d_ff, d_head, cond_features, window_size, index, cross_attn: Optional[CrossAttentionBlock] = None, dropout=0.0):
         super().__init__()
         window_shift = window_size // 2 if index % 2 == 1 else 0
         self.self_attn = ShiftedWindowSelfAttentionBlock(d_model, d_head, cond_features, window_size, window_shift, dropout=dropout)
+        self.cross_attn = cross_attn
         self.ff = FeedForwardBlock(d_model, d_ff, cond_features, dropout=dropout)
 
-    def forward(self, x, pos, cond):
+    def forward(self, x, pos, cond, crossattn_cond: Optional[FloatTensor] = None, crossattn_mask: Optional[BoolTensor] = None):
         x = checkpoint(self.self_attn, x, pos, cond)
+        if self.cross_attn is not None:
+            x = checkpoint(self.cross_attn, x, cond, crossattn_cond, crossattn_mask)
         x = checkpoint(self.ff, x, cond)
         return x
 
@@ -526,7 +575,7 @@ class NoAttentionTransformerLayer(nn.Module):
         super().__init__()
         self.ff = FeedForwardBlock(d_model, d_ff, cond_features, dropout=dropout)
 
-    def forward(self, x, pos, cond):
+    def forward(self, x, pos, cond, crossattn_cond: Optional[FloatTensor] = None, crossattn_mask: Optional[BoolTensor] = None):
         x = checkpoint(self.ff, x, cond)
         return x
 
@@ -635,6 +684,12 @@ class ShiftedWindowAttentionSpec:
 class NoAttentionSpec:
     pass
 
+@dataclass
+class CrossAttentionSpec:
+    d_head: int
+    d_cross: int
+    scale_qk: bool
+    dropout: float
 
 @dataclass
 class LevelSpec:
@@ -642,6 +697,7 @@ class LevelSpec:
     width: int
     d_ff: int
     self_attn: Union[GlobalAttentionSpec, NeighborhoodAttentionSpec, ShiftedWindowAttentionSpec, NoAttentionSpec]
+    cross_attn: Optional[CrossAttentionSpec]
     dropout: float
 
 
@@ -656,7 +712,7 @@ class MappingSpec:
 # Model class
 
 class ImageTransformerDenoiserModelV2(nn.Module):
-    def __init__(self, levels, mapping, in_channels, out_channels, patch_size, num_classes=0, mapping_cond_dim=0):
+    def __init__(self, levels: Sequence[LevelSpec], mapping: MappingSpec, in_channels, out_channels, patch_size, num_classes=0, mapping_cond_dim=0):
         super().__init__()
         self.num_classes = num_classes
 
@@ -672,12 +728,20 @@ class ImageTransformerDenoiserModelV2(nn.Module):
 
         self.down_levels, self.up_levels = nn.ModuleList(), nn.ModuleList()
         for i, spec in enumerate(levels):
+            cross_attn: Optional[CrossAttentionBlock] = None if spec.cross_attn is None else CrossAttentionBlock(
+                d_model=spec.width,
+                d_cross=spec.cross_attn.d_cross,
+                d_head=spec.cross_attn.d_head,
+                cond_features=mapping.width,
+                scale_qk=spec.cross_attn.scale_qk,
+                dropout=spec.cross_attn.dropout,
+            )
             if isinstance(spec.self_attn, GlobalAttentionSpec):
-                layer_factory = lambda _: GlobalTransformerLayer(spec.width, spec.d_ff, spec.self_attn.d_head, mapping.width, dropout=spec.dropout)
+                 layer_factory = lambda _: GlobalTransformerLayer(spec.width, spec.d_ff, spec.self_attn.d_head, mapping.width, cross_attn=cross_attn, dropout=spec.dropout)
             elif isinstance(spec.self_attn, NeighborhoodAttentionSpec):
-                layer_factory = lambda _: NeighborhoodTransformerLayer(spec.width, spec.d_ff, spec.self_attn.d_head, mapping.width, spec.self_attn.kernel_size, dropout=spec.dropout)
+                layer_factory = lambda _: NeighborhoodTransformerLayer(spec.width, spec.d_ff, spec.self_attn.d_head, mapping.width, spec.self_attn.kernel_size, cross_attn=cross_attn, dropout=spec.dropout)
             elif isinstance(spec.self_attn, ShiftedWindowAttentionSpec):
-                layer_factory = lambda i: ShiftedWindowTransformerLayer(spec.width, spec.d_ff, spec.self_attn.d_head, mapping.width, spec.self_attn.window_size, i, dropout=spec.dropout)
+                layer_factory = lambda i: ShiftedWindowTransformerLayer(spec.width, spec.d_ff, spec.self_attn.d_head, mapping.width, spec.self_attn.window_size, i, cross_attn=cross_attn, dropout=spec.dropout)
             elif isinstance(spec.self_attn, NoAttentionSpec):
                 layer_factory = lambda _: NoAttentionTransformerLayer(spec.width, spec.d_ff, mapping.width, dropout=spec.dropout)
             else:
@@ -709,7 +773,7 @@ class ImageTransformerDenoiserModelV2(nn.Module):
         ]
         return groups
 
-    def forward(self, x, sigma, aug_cond=None, class_cond=None, mapping_cond=None):
+    def forward(self, x, sigma, aug_cond=None, class_cond=None, mapping_cond=None, crossattn_cond: Optional[FloatTensor] = None, crossattn_mask: Optional[BoolTensor] = None) -> FloatTensor:
         # Patching
         x = x.movedim(-3, -1)
         x = self.patch_in(x)
@@ -733,17 +797,17 @@ class ImageTransformerDenoiserModelV2(nn.Module):
         # Hourglass transformer
         skips, poses = [], []
         for down_level, merge in zip(self.down_levels, self.merges):
-            x = down_level(x, pos, cond)
+            x = down_level(x, pos, cond, crossattn_cond, crossattn_mask)
             skips.append(x)
             poses.append(pos)
             x = merge(x)
             pos = downscale_pos(pos)
 
-        x = self.mid_level(x, pos, cond)
+        x = self.mid_level(x, pos, cond, crossattn_cond, crossattn_mask)
 
         for up_level, split, skip, pos in reversed(list(zip(self.up_levels, self.splits, skips, poses))):
             x = split(x, skip)
-            x = up_level(x, pos, cond)
+            x = up_level(x, pos, cond, crossattn_cond, crossattn_mask)
 
         # Unpatching
         x = self.out_norm(x)

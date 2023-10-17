@@ -14,6 +14,7 @@ import torch
 from torch import nn, optim
 from torch.utils import data
 from torchvision.transforms import functional as TF
+from typing import Dict, Any, Callable, TypeAlias, Iterable, List
 
 
 def from_pil_image(x):
@@ -33,6 +34,14 @@ def to_pil_image(x):
         x = x[0]
     return TF.to_pil_image((x.clamp(-1, 1) + 1) / 2)
 
+BatchData: TypeAlias = Dict[str, List[Any]]
+DataSetTransform: TypeAlias = Callable[[BatchData], BatchData]
+def hf_datasets_multi_transform(batch: BatchData, transforms: Iterable[DataSetTransform]) -> BatchData:
+    acc: BatchData = {}
+    for transform in transforms:
+        transformed: BatchData = transform(batch)
+        acc.update(transformed)
+    return acc
 
 def hf_datasets_augs_helper(examples, transform, image_key, mode='RGB'):
     """Apply passed in transforms for HuggingFace Datasets."""
@@ -334,6 +343,11 @@ def rand_log_logistic(shape, loc=0., scale=1., min_value=0., max_value=float('in
     max_cdf = max_value.log().sub(loc).div(scale).sigmoid()
     u = stratified_with_settings(shape, device=device, dtype=torch.float64) * (max_cdf - min_cdf) + min_cdf
     return u.logit().mul(scale).add(loc).exp().to(dtype)
+
+
+def rand_uniform(shape, min_value, max_value, device='cpu', dtype=torch.float32):
+    """Draws samples from a uniform distribution."""
+    return (stratified_with_settings(shape, device=device, dtype=dtype) * (max_value - min_value) + min_value)
 
 
 def rand_log_uniform(shape, min_value, max_value, device='cpu', dtype=torch.float32):

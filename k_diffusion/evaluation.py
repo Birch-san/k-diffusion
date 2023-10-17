@@ -5,10 +5,11 @@ from pathlib import Path
 from cleanfid.inception_torchscript import InceptionV3W
 import clip
 import torch
-from torch import nn
+from torch import nn, FloatTensor
 from torch.nn import functional as F
 from torchvision import transforms
 from tqdm.auto import trange
+from typing import Callable
 
 from . import utils
 
@@ -77,13 +78,15 @@ class DINOv2FeatureExtractor(nn.Module):
         return x
 
 
-def compute_features(accelerator, sample_fn, extractor_fn, n, batch_size):
+def compute_features(accelerator, sample_fn, extractor_fn, n, batch_size, observe_samples: Callable[[FloatTensor], None] = None):
     n_per_proc = math.ceil(n / accelerator.num_processes)
     feats_all = []
     try:
         for i in trange(0, n_per_proc, batch_size, disable=not accelerator.is_main_process):
             cur_batch_size = min(n - i, batch_size)
             samples = sample_fn(cur_batch_size)[:cur_batch_size]
+            if observe_samples is not None:
+                observe_samples(samples)
             feats_all.append(accelerator.gather(extractor_fn(samples)))
     except StopIteration:
         pass
