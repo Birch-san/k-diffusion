@@ -526,8 +526,8 @@ def main():
             class_cond_in = torch.cat([class_uncond, class_cond])
             out = model(x_in, sigma_in, class_cond=class_cond_in)
             out_uncond, out_cond = out.chunk(2)
-            return out_uncond + (out_cond - out_uncond) * cfg_scale
-        if cfg_scale != 1:
+            return out_uncond + (out_cond - out_uncond) * args.cfg_scale
+        if args.cfg_scale != 1:
             return cfg_model_fn
         return model
     
