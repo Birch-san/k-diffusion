@@ -324,16 +324,6 @@ def main():
         ema_sched: Optional[K.utils.EMAWarmup] = None
         # for FSDP support: model must be prepared separately and before optimizers
         inner_model_ema = accelerator.prepare(inner_model_ema)
-    
-    with torch.no_grad(), K.models.flops.flop_counter() as fc:
-        x = torch.zeros([1, model_config['input_channels'], size[0], size[1]], device=device)
-        sigma = torch.ones([1], device=device)
-        extra_args = {}
-        if getattr(unwrap((inner_model or inner_model_ema)), "num_classes", 0):
-            extra_args[class_cond_key] = torch.zeros([1], dtype=torch.long, device=device)
-        (inner_model or inner_model_ema)(x, sigma, **extra_args)
-        if accelerator.is_main_process:
-            print(f"Forward pass GFLOPs: {fc.flops / 1_000_000_000:,.3f}", flush=True)
 
     tf = transforms.Compose([
         transforms.Resize(size[0], interpolation=transforms.InterpolationMode.BICUBIC),
@@ -396,6 +386,16 @@ def main():
         else:
             model_ema.requires_grad_(False).eval()
         class_cond_key = 'y'
+    
+    with torch.no_grad(), K.models.flops.flop_counter() as fc:
+        x = torch.zeros([1, model_config['input_channels'], size[0], size[1]], device=device)
+        sigma = torch.ones([1], device=device)
+        extra_args = {}
+        if getattr(unwrap((inner_model or inner_model_ema)), "num_classes", 0):
+            extra_args[class_cond_key] = torch.zeros([1], dtype=torch.long, device=device)
+        (inner_model or inner_model_ema)(x, sigma, **extra_args)
+        if accelerator.is_main_process:
+            print(f"Forward pass GFLOPs: {fc.flops / 1_000_000_000:,.3f}", flush=True)
 
     if args.output_to_subdir:
         run_root = f'{args.out_root}/{args.name}'
