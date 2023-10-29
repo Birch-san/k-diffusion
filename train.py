@@ -107,6 +107,8 @@ def main():
                    help='save a demo grid every this many steps')
     p.add_argument('--demo-classcond-include-uncond', action='store_true',
                    help='when producing demo grids for class-conditional tasks: allow the generation of uncond demo samples (class chosen from num_classes+1 instead of merely num_classes)')
+    p.add_argument('--goose-mode', action='store_true',
+                   help='very important option for scientists at EleutherAI')
     p.add_argument('--dinov2-model', type=str, default='vitl14',
                    choices=K.evaluation.DINOv2FeatureExtractor.available_models(),
                    help='the DINOv2 model to use to evaluate')
@@ -555,7 +557,10 @@ def main():
             extra_args = {**extra_args, **cfg_args.sampling_extra_args}
             model_fn = make_cfg_crossattn_model_fn(model_ema, masked_uncond=masked_uncond, cfg_scale=args.cfg_scale)
         elif num_classes:
-            class_cond = torch.randint(0, num_classes + maybe_uncond_class, [accelerator.num_processes, n_per_proc], generator=demo_gen).to(device)
+            if args.goose_mode:
+                class_cond = torch.full([accelerator.num_processes, n_per_proc], fill_value=99, dtype=torch.int64).to(device)
+            else:
+                class_cond = torch.randint(0, num_classes + maybe_uncond_class, [accelerator.num_processes, n_per_proc], generator=demo_gen).to(device)
             dist.broadcast(class_cond, 0)
             # print ImageNet class labels like so:
             # from kdiff_trainer.dataset_meta.imagenet_1k import class_labels
