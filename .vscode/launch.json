@@ -299,5 +299,33 @@
         "TORCHINDUCTOR_COMPILE_THREADS": "1",
       },
     },
+    {
+      "name": "Python: Inference many 557M",
+      "type": "python",
+      "request": "launch",
+      "program": "train.py",
+      "console": "integratedTerminal",
+      "justMyCode": false,
+      "args": [
+        "--config", "configs/config_557M.jsonc",
+        // "--resume-inference", "/nvme1/ml-weights/256x256_diffusion.pt",
+        // "--resume-inference", "/p/scratch/ccstdl/birch1/256x256_diffusion.pt",
+        "--resume-inference", "/p/scratch/ccstdl/birch1/ckpt/imagenet_test_v2_007_02200000.safetensors",
+        "--inference-only",
+        "--cfg-scale", "1.4",
+        "--demo-title-qualifier", "CFG 1.4",
+        // "--inference-n", "10",
+        // "--inference-out-wds-root", "out/wds3",
+        // "--inference-out-wds-shard", "0",
+        "--sample-n", "64",
+        "--start-method", "fork",
+        "--name", "kat-557M",
+        "--goose-mode",
+      ],
+      "env": {
+        "K_DIFFUSION_USE_COMPILE": "0",
+        "TORCHINDUCTOR_COMPILE_THREADS": "1",
+      }
+    },
   ]
 }
