@@ -791,7 +791,7 @@ class MappingSpec:
 # Model class
 
 class ImageTransformerDenoiserModelV2(nn.Module):
-    def __init__(self, levels: Sequence[LevelSpec], mapping: MappingSpec, in_channels, out_channels, patch_size, num_classes=0, mapping_cond_dim=0, up_proj_act: Literal["GELU", "GEGLU"] = "GELU", pos_emb_type: Literal["ROPE", "additive"] = "ROPE", input_size: Optional[Union[int, Tuple[int, int]]] = None):
+    def __init__(self, levels: Sequence[LevelSpec], mapping: MappingSpec, in_channels, out_channels, patch_size, num_classes=0, mapping_cond_dim=0, up_proj_act: Literal["GELU", "GEGLU"] = "GEGLU", pos_emb_type: Literal["ROPE", "additive"] = "ROPE", input_size: Optional[Union[int, Tuple[int, int]]] = None):
         super().__init__()
         self.num_classes = num_classes
 

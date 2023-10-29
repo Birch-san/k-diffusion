@@ -69,7 +69,7 @@ def load_config(path_or_dict: Union[str, Dict], use_json5=False):
             'augment_wrapper': False,
             'skip_stages': 0,
             'has_variance': False,
-            'up_proj_act': 'GELU',
+            'up_proj_act': 'GEGLU',
             'pos_emb_type': 'ROPE',
         },
         'optimizer': {
