@@ -880,11 +880,7 @@ class ImageTransformerDenoiserModelV2(nn.Module):
         if self.pos_emb_type == 'ROPE':
             pos = make_axial_pos(x.shape[-3], x.shape[-2], device=x.device).view(x.shape[-3], x.shape[-2], 2)
         elif self.pos_emb_type == 'additive':
-            # out of an abundance of caution: we sum in float32, downcasting afterwards.
-            # it might well be safe to do the simpler thing of just downcasting self.pos_emb, then summing in half-precision.
-            # we don't know :)
-            x_dtype = x.dtype
-            x = (x.to(self.pos_emb.dtype) + self.pos_emb).to(x_dtype)
+            x = x + self.pos_emb.to(x.dtype)
             pos = None
         else:
             raise ValueError(f"Unknown pos emb type '{self.pos_emb_type}'")
