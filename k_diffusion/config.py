@@ -152,6 +152,10 @@ def load_config(path_or_dict: Union[str, Dict], use_json5=False):
             config['model']['dropout_rate'] = [0.0] * len(config['model']['widths'])
         elif isinstance(config['model']['dropout_rate'], float):
             config['model']['dropout_rate'] = [config['model']['dropout_rate']] * len(config['model']['widths'])
+    elif config['model']['type'] == 'dit':
+        for key in config['model']:
+            assert key in ['type', 'dit_variant', 'input_size', 'input_channels'] + ['loss_config', 'loss_weighting', 'loss_scales', 'dropout_rate', 'augment_prob', 'sigma_data', 'sigma_min', 'sigma_max', 'sigma_sample_density'], f"No explicit handling for model config key {key}."
+        config['model']['num_classes'] = config['dataset']['num_classes']
     return merge(defaults, config)
 
 
@@ -243,6 +247,16 @@ def make_model(config):
             pos_emb_type=config["pos_emb_type"],
             input_size=config['input_size'],
         )
+    elif config['type'] == 'dit':
+        from .models.dit import DiT_models
+        if not isinstance(config['input_size'], int):
+            assert len(config['input_size']) == 2 and config['input_size'][0] == config['input_size'][1]
+            input_size = config['input_size'][0]
+        else:
+            input_size = config['input_size']
+        inner_model = DiT_models[config['dit_variant']](input_size=input_size, in_channels=config['input_channels'], class_dropout_prob=0, num_classes=config['num_classes'], learn_sigma=False)
+        from .external import DiTDenoiser
+        model = DiTDenoiser(inner_model)
     else:
         raise ValueError(f'unsupported model type {config["type"]}')
     return model
