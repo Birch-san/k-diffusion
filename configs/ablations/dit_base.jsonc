@@ -32,6 +32,8 @@
     "dataset": {
         "type": "imagefolder-class",
         "location": "/home/kat/datasets/ilsvrc2012/train",
+        // "location": "/nvme1/ml-data/ImageNet/train",
+        "classes_to_captions": "imagenet-1k",
         "num_classes": 1000,
         "cond_dropout_rate": 0.1
     },

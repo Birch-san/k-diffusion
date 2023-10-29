@@ -268,6 +268,36 @@
         "--start-method", "fork",
         "--torchmetrics-fid",
       ],
-    }
+    },
+    {
+      "name": "Python: Ablation integration-test",
+      "type": "python",
+      "request": "launch",
+      "program": "train.py",
+      "console": "integratedTerminal",
+      "justMyCode": false,
+      "subProcess": false,
+      "args": [
+        "--config", "configs/ablations/hourglass_base.jsonc",
+        "--out-root", "out",
+        "--output-to-subdir",
+        "--name", "ablation_hourglass_base_demo_001",
+        "--sample-n", "36",
+        "--demo-every", "64",
+        "--evaluate-n", "16",
+        "--evaluate-every", "128",
+        "--save-every", "150",
+        "--batch-size", "32",
+        "--mixed-precision", "bf16",
+        "--demo-classcond-include-uncond",
+        "--demo-img-compress",
+        "--font", "./kdiff_trainer/font/DejaVuSansMono.ttf",
+        "--start-method", "fork",
+      ],
+      "env": {
+        "K_DIFFUSION_USE_COMPILE": "0",
+        "TORCHINDUCTOR_COMPILE_THREADS": "1",
+      },
+    },
   ]
 }
