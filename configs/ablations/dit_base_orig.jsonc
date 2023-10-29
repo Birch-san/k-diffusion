@@ -1,0 +1,46 @@
+{
+    "model": {
+        "type": "dit",
+        "input_channels": 3,
+        "input_size": [128, 128],
+        "dit_variant": "DiT-B/4",
+
+        "loss_config": "karras",
+        "loss_weighting": "snr",
+        "loss_scales": 1,
+        "dropout_rate": [0.0],
+        "augment_prob": 0.0,
+        
+        "sigma_data": 0.5,
+        // Inferred from the original schedule
+        "sigma_min": 1e-2,
+        // "sigma_max": 160,
+        "sigma_max": 157.4073,
+        "sigma_sample_density": {
+            "type": "cosine-interpolated"
+        }
+    },
+    "dataset": {
+        "type": "imagefolder-class",
+        "location": "/home/kat/datasets/ilsvrc2012/train",
+        "classes_to_captions": "imagenet-1k",
+        "num_classes": 1000,
+        "cond_dropout_rate": 0.1
+    },
+    // TODO: also run with original optimizer settings
+    "optimizer": {
+        "type": "adamw",
+        "lr": 5e-4,
+        "betas": [0.9, 0.95],
+        "eps": 1e-8,
+        "weight_decay": 1e-2
+    },
+    "lr_sched": {
+        "type": "constant"
+    },
+    "ema_sched": {
+        "type": "inverse",
+        "power": 0.75,
+        "max_value": 0.9999
+    }
+}

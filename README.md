@@ -8,6 +8,8 @@ An implementation of [Elucidating the Design Space of Diffusion-Based Generative
 
 `k-diffusion` contains a new model type, `image_transformer_v2`, that uses ideas from [Hourglass Transformer](https://arxiv.org/abs/2110.13711) and [DiT](https://arxiv.org/abs/2212.09748).
 
+Some code from the [DiT repository](https://github.com/facebookresearch/DiT) is included for comparisons, which uses a different license that is incompatible with the MIT one. The relevant license is at the top of each file in this case.
+
 ### Requirements
 
 To use the new model type you will need to install custom CUDA kernels:

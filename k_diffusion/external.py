@@ -2,6 +2,7 @@ import math
 
 import torch
 from torch import nn
+import numpy as np
 
 from . import sampling, utils
 
@@ -136,6 +137,31 @@ class CompVisDenoiser(DiscreteEpsDDPMDenoiser):
 
     def get_eps(self, *args, **kwargs):
         return self.inner_model.apply_model(*args, **kwargs)
+
+
+class DiTDenoiser(DiscreteEpsDDPMDenoiser):
+    """A wrapper for CompVis diffusion models."""
+
+    def __init__(self, model, quantize=False):
+        from .models._dit import create_diffusion
+        dit_diffusion_module = create_diffusion(timestep_respacing='')
+        super().__init__(model, torch.from_numpy(dit_diffusion_module.alphas_cumprod.astype(np.float32)), quantize=quantize)
+        print(f'Original schedule: {self.sigma_max=}, {self.sigma_min=}. Make sure these match your config!')
+
+    def get_eps(self, *args, **kwargs):
+        # print(f'{", ".join(f"{v.shape} ({v.dtype})" for v in args)}, {", ".join(f"{k}={v.shape} ({v.dtype})" for k, v in kwargs.items())}')
+        # DiT accepts x, t, y
+        if len(args) == 2 and not 'y' in kwargs:
+            if 'class_cond' in kwargs:
+                kwargs['y'] = kwargs.pop('class_cond')
+            else:
+                kwargs['y'] = torch.tensor([self.inner_model.num_classes - 1] * len(args[0])).to(args[0].device)
+        # Remove unused args
+        kwargs.pop('aug_cond', None)
+        return self.inner_model(*args, **kwargs)
+
+    def param_groups(self, base_lr):
+        return [{ "params": self.parameters(), "lr": base_lr }]
 
 
 class DiscreteVDDPMDenoiser(DiscreteSchedule):
