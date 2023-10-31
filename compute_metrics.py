@@ -7,6 +7,7 @@ from torch import distributed as dist, multiprocessing as mp, Tensor, FloatTenso
 from torch.utils import data
 from torchvision import transforms
 from typing import Dict, Optional, Literal, Callable
+import math
 from kdiff_trainer.dataset.get_dataset import get_dataset
 
 def ensure_distributed():
@@ -49,10 +50,6 @@ def main():
 
     mp.set_start_method(args.start_method)
     torch.backends.cuda.matmul.allow_tf32 = True
-    try:
-        torch._dynamo.config.automatic_dynamic_shapes = False
-    except AttributeError:
-        pass
     
     accelerator = accelerate.Accelerator(mixed_precision=args.mixed_precision)
     ensure_distributed()
@@ -98,7 +95,7 @@ def main():
             except TypeError:
                 pass
 
-    pred_train_dl, target_train_dl = (data.DataLoader(train_set, args.batch_size, shuffle=not isinstance(train_set, data.IterableDataset), drop_last=True, num_workers=args.num_workers, persistent_workers=True, pin_memory=True) for train_set in (pred_train_set, target_train_set))
+    pred_train_dl, target_train_dl = (data.DataLoader(train_set, args.batch_size, shuffle=not isinstance(train_set, data.IterableDataset), drop_last=False, num_workers=args.num_workers, persistent_workers=True, pin_memory=True) for train_set in (pred_train_set, target_train_set))
     pred_train_dl, target_train_dl = accelerator.prepare(pred_train_dl, target_train_dl)
 
     match args.evaluate_with:
@@ -140,6 +137,9 @@ def main():
         fid = K.evaluation.fid(features['pred'], features['target'])
         kid = K.evaluation.kid(features['pred'], features['target'])
         print(f'CleanFID FID: {fid.item():g}, KID: {kid.item():g}')
+        print(f"Finished evaluating {features['pred'].shape[0]} samples.")
+        assert features['pred'].shape[0] == args.evaluate_n, f"you requested --evaluate-n={args.evaluate_n}, but we found {features['pred'].shape[0]} samples. probably the trange() inside K.evaluation.compute_features skipped the final batch due to rounding problems. try ensuring that evaluate_n is divisible by batch_size*procs without a remainder."
+        assert features['pred'].shape[0] == features['target'].shape[0], f"somehow we have a mismatch between number of ground-truth samples ({features['target'].shape[0]}) and model-predicted samples ({features['pred'].shape[0]})."
     del iter_
 
 if __name__ == '__main__':
