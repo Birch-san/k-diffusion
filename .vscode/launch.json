@@ -339,7 +339,7 @@
         "--sample-n", "64",
         "--start-method", "fork",
         "--name", "kat-557M",
-        "--goose-mode",
+        // "--goose-mode",
       ],
       "env": {
         "K_DIFFUSION_USE_COMPILE": "0",
