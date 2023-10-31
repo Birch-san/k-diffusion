@@ -1,0 +1,16 @@
+{
+  "model": {
+    "type": "none",
+    "input_size": [256, 256]
+  },
+  "dataset": {
+    // avoiding class mode because compute_metrics.py doesn't utilize labels, and it turns out that numpy array was a high-overhead way to store an int32
+    // "type": "wds-class",
+    // "class_cond_key": "class_cond.npy",
+    "type": "wds",
+    "wds_image_key": "img.png",
+    "location": "/p/scratch/ccstdl/birch1/model-out/kat_557M/collated/cfg1.00/{00000..00007}.tar",
+    "num_classes": 1000,
+    "classes_to_captions": "imagenet-1k"
+  }
+}
