@@ -279,12 +279,13 @@
       "justMyCode": true,
       "subProcess": false,
       "args": [
-        "--config-pred", "configs/dataset/pred/557M_cfg1.30.juelich.jsonc",
+        "--config-pred", "configs/dataset/pred/557M_cfg1.00.juelich.jsonc",
         "--config-target", "configs/dataset/imagenet.juelich.jsonc",
         "--evaluate-n", "50000",
         "--batch-size", "250",
         "--start-method", "fork",
         "--torchmetrics-fid",
+        "--evaluate-with", "dinov2"
       ]
     },
     {
