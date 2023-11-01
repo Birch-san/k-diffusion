@@ -4,6 +4,7 @@
     "type": "imagefolder-class",
     "location": "/nvme1/ml-data/ImageNet/train",
     "num_classes": 1000,
-    "classes_to_captions": "imagenet-1k"
+    "classes_to_captions": "imagenet-1k",
+    "estimated_samples": 1281167
   }
 }

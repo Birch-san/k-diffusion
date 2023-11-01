@@ -2,7 +2,7 @@
   "model": { "type": "none" },
   "dataset": {
     "type": "imagefolder-class",
-    "location": "/home/kat/datasets/ilsvrc2012/train",
+    "location": "/p/scratch/transfernetx/datasets/ImageNet/im-1k/train",
     "num_classes": 1000,
     "classes_to_captions": "imagenet-1k",
     "estimated_samples": 1281167
