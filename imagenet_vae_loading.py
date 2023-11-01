@@ -214,7 +214,7 @@ def main():
             for sample_ix_in_batch, (latent, cls) in enumerate(zip(latents.unbind(), classes.unbind())):
                 sample_ix_in_corpus: int = batch_ix * args.batch_size + sample_ix_in_batch
                 sink_sample(sink, sample_ix_in_corpus, latent, cls.item())
-            del latents, per_channel_means, per_channel_stds
+            del latents
     print(f"r{accelerator.process_index} done")
     if accelerator.is_main_process:
         print(f'Saving averages to {avg_out_dir}')
