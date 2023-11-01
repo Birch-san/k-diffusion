@@ -356,13 +356,40 @@
       "subProcess": true,
       "args": [
         "--config", "configs/dataset/imagenet.juelich.jsonc",
-        "--batch-size", "4",
-        "--num-workers", "1",
+        "--batch-size", "256",
+        "--num-workers", "8",
+        "--log-average-every-n", "25",
+        "--save-average-every-n", "250",
+        "--out-root", "/p/scratch/ccstdl/birch1/dataset-out/imagenet-latents",
         "--start-method", "fork",
       ],
       "env": {
         "K_DIFFUSION_USE_COMPILE": "0",
         "TORCHINDUCTOR_COMPILE_THREADS": "1",
+      }
+    },
+    {
+      "name": "Python: Preprocess latent dataset (accelerate)",
+      "type": "python",
+      "request": "launch",
+      "module": "accelerate.commands.launch",
+      "console": "integratedTerminal",
+      "justMyCode": false,
+      "subProcess": true,
+      "args": [
+        "--config_file", "/p/project/ccstdl/birch1/.cache/huggingface/accelerate/ddp.yaml",
+        "imagenet_vae_loading.py",
+        "--config", "configs/dataset/imagenet.juelich.jsonc",
+        "--batch-size", "16",
+        "--num-workers", "8",
+        "--log-average-every-n", "25",
+        "--save-average-every-n", "250",
+        "--start-method", "fork",
+      ],
+      "env": {
+        "K_DIFFUSION_USE_COMPILE": "0",
+        "TORCHINDUCTOR_COMPILE_THREADS": "1",
+        "PYDEVD_DISABLE_FILE_VALIDATION": "1",
       }
     },
   ]

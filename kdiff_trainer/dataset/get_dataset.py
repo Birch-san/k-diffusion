@@ -111,7 +111,7 @@ def get_dataset(
         train_set.set_transform(multi_transform)
         return train_set['train']
     if dataset_config['type'] == 'wds' or dataset_config['type'] == 'wds-class':
-        from webdataset import WebDataset
+        from webdataset import WebDataset, split_by_node
         img_from_sample = _ImgFromSample(
             image_key=dataset_config['wds_image_key'],
             tf=tf,
@@ -125,7 +125,7 @@ def get_dataset(
             )
         else:
             raise ValueError('')
-        return WebDataset(dataset_config['location']).map(mapper).shuffle(1000)
+        return WebDataset(dataset_config['location'], nodesplitter=split_by_node).map(mapper).shuffle(1000)
     if dataset_config['type'] == 'custom':
         import importlib.util
         location = (config_dir / dataset_config['location']).resolve()
