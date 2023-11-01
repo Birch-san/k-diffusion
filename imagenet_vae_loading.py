@@ -18,6 +18,9 @@ import math
 
 import k_diffusion as K
 from kdiff_trainer.dataset.get_dataset import get_dataset
+from kdiff_trainer.vae.attn.null_attn_processor import NullAttnProcessor
+from kdiff_trainer.vae.attn.natten_attn_processor import NattenAttnProcessor
+from kdiff_trainer.vae.attn.qkv_fusion import fuse_vae_qkv
 
 SinkOutput = TypedDict('SinkOutput', {
   '__key__': str,
@@ -42,9 +45,9 @@ def main():
                    help='square side length to which to resize-and-crop image')
     p.add_argument('--seed', type=int,
                    help='the random seed')
-    p.add_argument('--log-average-every-n', type=int, default=50,
+    p.add_argument('--log-average-every-n', type=int, default=1000,
                    help='how noisy do you want your logs to be (log the online average per-channel mean and std of latents every n batches)')
-    p.add_argument('--save-average-every-n', type=int, default=1000,
+    p.add_argument('--save-average-every-n', type=int, default=10000,
                    help="how frequently to save the welford averages. the main reason we do it on an interval is just so there's no nasty surprise at the end of the run.")
     p.add_argument('--use-ollin-vae', action='store_true',
                    help="use Ollin's fp16 finetune of SDXL 0.9 VAE")
@@ -53,6 +56,9 @@ def main():
     p.add_argument('--start-method', type=str, default='spawn',
                    choices=['fork', 'forkserver', 'spawn'],
                    help='the multiprocessing start method')
+    p.add_argument('--vae-attn-impl', type=str, default='original',
+                   choices=['original', 'natten', 'null'],
+                   help='use more lightweight attention in VAE (https://github.com/Birch-san/sdxl-play/pull/3)')
     p.add_argument('--out-root', type=str, default="./out/latents",
                    help='[in inference-only mode] directory into which to output WDS .tar files')
 
@@ -118,6 +124,27 @@ def main():
         use_safetensors=True,
         **vae_kwargs,
     )
+
+    if args.vae_attn_impl == 'natten':
+        fuse_vae_qkv(vae)
+        # NATTEN seems to output identical output to global self-attention at kernel size 17
+        # even kernel size 3 looks good (not identical, but very close).
+        # I haven't checked what's the smallest kernel size that can look identical. 15 looked good too.
+        # seems to speed up encoding of 1024x1024px images by 11%
+        vae.set_attn_processor(NattenAttnProcessor(kernel_size=17))
+    elif args.vae_attn_impl == 'null':
+        for attn in [*vae.encoder.mid_block.attentions, *vae.decoder.mid_block.attentions]:
+            # you won't be needing these
+            del attn.to_q, attn.to_k
+        # doesn't mix information between tokens via QK similarity. just projects every token by V and O weights.
+        # looks alright, but is by no means identical to global self-attn.
+        vae.set_attn_processor(NullAttnProcessor())
+    elif args.vae_attn_impl == 'original':
+        # leave it as global self-attention
+        pass
+    else:
+        raise ValueError(f"Never heard of --vae-attn-impl '{args.vae_attn_impl}'")
+
     del vae.decoder
     vae.to(accelerator.device).eval()
     if args.compile:
@@ -131,6 +158,7 @@ def main():
     if accelerator.is_main_process:
         from webdataset import ShardWriter
         makedirs(wds_out_dir, exist_ok=True)
+        makedirs(avg_out_dir, exist_ok=True)
         sink_ctx = ShardWriter(f'{wds_out_dir}/%05d.tar', maxcount=10000)
         w_mean = Welford(device=accelerator.device)
         w_std = Welford(device=accelerator.device)
