@@ -133,7 +133,7 @@ def main():
                    help='[in inference-only mode] the number of samples to generate in total (in batches of up to --sample-n)')
     p.add_argument('--inference-out-wds-root', type=str, default=None,
                    help='[in inference-only mode] directory into which to output WDS .tar files')
-    p.add_argument('--inference-out-wds-shard', type=int, default=0,
+    p.add_argument('--inference-out-wds-shard', type=int, default=None,
                    help="[in inference-only mode] the directory within the WDS dataset .tar to place each sample. this enables you to prevent key clashes if you were to tell multiple nodes to independently produce .tars and collect them together into a single dataset afterward (poor man's version of multi-node support).")
     p.add_argument('--lr', type=float,
                    help='the learning rate')
@@ -748,10 +748,11 @@ def main():
                 from webdataset import ShardWriter
                 makedirs(args.inference_out_wds_root, exist_ok=True)
                 sink_ctx = ShardWriter(f'{args.inference_out_wds_root}/%05d.tar', maxcount=10000)
+                shard_qualifier: Optional[str] = '' if args.inference_out_wds_shard is None else f'{args.inference_out_wds_shard}/'
                 if num_classes:
                     def sink_sample(sink: ShardWriter, ix: int, sample: ClassConditionalSample) -> None:
                         out: SinkOutput = {
-                            '__key__': f'{args.inference_out_wds_shard}/{ix}',
+                            '__key__': f'{shard_qualifier}{ix}',
                             'img.png': sample.pil,
                             'class_cond.npy': np.array(sample.class_cond),
                         }
@@ -759,7 +760,7 @@ def main():
                 else:
                     def sink_sample(sink: ShardWriter, ix: int, sample: Sample) -> None:
                         out: SinkOutput = {
-                            '__key__': f'{args.inference_out_wds_shard}/{ix}',
+                            '__key__': f'{shard_qualifier}{ix}',
                             'img.png': sample.pil,
                         }
                         sink.write(out)
