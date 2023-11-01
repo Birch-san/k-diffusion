@@ -117,9 +117,9 @@ def main():
             fid_obj = FrechetInceptionDistance(feature=2048, normalize=True)
             fid_obj.to(accelerator.device)
         def observe_samples(samples: FloatTensor) -> None:
-            accelerator.gather(samples)
+            all_samples: FloatTensor = accelerator.gather(samples)
             if accelerator.is_main_process:
-                fid_obj.update(samples, real=source_name == 'target')
+                fid_obj.update(all_samples, real=source_name == 'target')
     else:
         observe_samples: Optional[Callable[[FloatTensor], None]] = None
     features: Dict[Literal['pred', 'target'], Optional[Tensor]] = { 'pred': None, 'target': None }
