@@ -149,9 +149,11 @@ def main():
                    help='the checkpoint to resume from')
     p.add_argument('--resume-inference', type=str,
                    help='the inference checkpoint to resume from')
+    p.add_argument('--demo-steps', type=int, default=50,
+                   help='the number of steps to sample for demo grids')
     p.add_argument('--sample-n', type=int, default=64,
                    help='the number of images to sample for demo grids')
-    p.add_argument('--sampler-preset', type=str, default='dpm3', choices=['dpm2', 'dpm3'],
+    p.add_argument('--sampler-preset', type=str, default='dpm3', choices=['dpm2', 'dpm3', 'ddpm'],
                    help='whether to use the original DPM++(2M) SDE, sampler_type="heun" eta=0. config or to use DPM++(3M) SDE eta=1., which seems to get lower FID')
     p.add_argument('--save-every', type=int, default=10000,
                    help='save every this many steps')
@@ -517,6 +519,9 @@ def main():
     elif args.sampler_preset == 'dpm2':
         def do_sample(model_fn: Callable, x: FloatTensor, sigmas: FloatTensor, extra_args: Dict[str, Any], disable: bool) -> FloatTensor:
             return K.sampling.sample_dpmpp_2m_sde(model_fn, x, sigmas, extra_args=extra_args, eta=0.0, solver_type='heun', disable=disable)
+    elif args.sampler_preset == 'ddpm':
+        def do_sample(model_fn: Callable, x: FloatTensor, sigmas: FloatTensor, extra_args: Dict[str, Any], disable: bool) -> FloatTensor:
+            return K.sampling.sample_euler_ancestral(model_fn, x, sigmas, extra_args=extra_args, eta=1.0, disable=disable)
     else:
         raise ValueError(f"Unsupported sampler_preset: '{args.sampler_preset}'")
 
@@ -567,7 +572,7 @@ def main():
             # print('\n'.join([' | '.join([class_labels[cell] for cell in row]) for row in class_cond[accelerator.process_index].unflatten(-1, sizes=(4,4)).tolist()]))
             extra_args[class_cond_key] = class_cond[accelerator.process_index]
             model_fn = make_cfg_model_fn(model_ema)
-        sigmas = K.sampling.get_sigmas_karras(50, sigma_min, sigma_max, rho=7., device=device)
+        sigmas = K.sampling.get_sigmas_karras(args.demo_steps, sigma_min, sigma_max, rho=7., device=device)
 
         x_0: FloatTensor = do_sample(model_fn, x, sigmas, extra_args=extra_args, disable=not accelerator.is_main_process)
         x_0 = accelerator.gather(x_0)[:args.sample_n]
