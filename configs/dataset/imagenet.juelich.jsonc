@@ -6,6 +6,7 @@
     "wds_image_key": "jpg",
     "class_cond_key": "cls",
     "num_classes": 1000,
-    "classes_to_captions": "imagenet-1k"
+    "classes_to_captions": "imagenet-1k",
+    "estimated_samples": 1281167
   }
 }
