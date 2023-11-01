@@ -1,9 +1,8 @@
 import accelerate
-from accelerate.state import AcceleratorState
 import argparse
 from pathlib import Path
 import torch
-from torch import distributed as dist, multiprocessing as mp, inference_mode, FloatTensor
+from torch import distributed as dist, multiprocessing as mp, inference_mode, FloatTensor, Tensor
 from torch.utils import data
 from torch.utils.data.dataset import Dataset, IterableDataset
 from torchvision import transforms
@@ -22,30 +21,13 @@ from kdiff_trainer.dataset.get_dataset import get_dataset
 
 SinkOutput = TypedDict('SinkOutput', {
   '__key__': str,
-  'img.png': FloatTensor,
-  'txt': bytes,
+  'latent.pth': FloatTensor,
+  'cls': bytes,
 })
 
 def ensure_distributed():
     if not dist.is_initialized():
         dist.init_process_group(world_size=1, rank=0, store=dist.HashStore())
-
-def collate_fn(data):
-
-    images = []
-    paths = []
-    for entry in data:
-
-        image = entry["image"]
-        if type(image) == int:
-            if image == -1:
-                continue
-        images.append(image)
-        paths.append(entry["path"])
-
-    images = preprocess_train(images)
-    images = torch.stack(images)
-    return {"images": images, "paths": paths}
 
 def main():
     p = argparse.ArgumentParser(description=__doc__,
@@ -60,6 +42,10 @@ def main():
                    help='square side length to which to resize-and-crop image')
     p.add_argument('--seed', type=int,
                    help='the random seed')
+    p.add_argument('--log-average-every-n', type=int, default=50,
+                   help='how noisy do you want your logs to be (log the online average per-channel mean and std of latents every n batches)')
+    p.add_argument('--save-average-every-n', type=int, default=1000,
+                   help="how frequently to save the welford averages. the main reason we do it on an interval is just so there's no nasty surprise at the end of the run.")
     p.add_argument('--use-ollin-vae', action='store_true',
                    help="use Ollin's fp16 finetune of SDXL 0.9 VAE")
     p.add_argument('--compile', action='store_true',
@@ -67,7 +53,7 @@ def main():
     p.add_argument('--start-method', type=str, default='spawn',
                    choices=['fork', 'forkserver', 'spawn'],
                    help='the multiprocessing start method')
-    p.add_argument('--out-root', type=str, default="./shards",
+    p.add_argument('--out-root', type=str, default="./out/latents",
                    help='[in inference-only mode] directory into which to output WDS .tar files')
 
     args = p.parse_args()
@@ -132,55 +118,80 @@ def main():
         use_safetensors=True,
         **vae_kwargs,
     )
+    del vae.decoder
     vae.to(accelerator.device).eval()
     if args.compile:
         vae = torch.compile(vae, fullgraph=True, mode='max-autotune')
 
     train_dl = accelerator.prepare(train_dl)
 
+    wds_out_dir = f'{args.out_root}/wds'
+    avg_out_dir = f'{args.out_root}/avg'
+
     if accelerator.is_main_process:
         from webdataset import ShardWriter
-        makedirs(args.out_root, exist_ok=True)
-        print(f'process {accelerator.process_index}')
-        print(f'num AcceleratorState().num_processes')
-        sink_ctx = ShardWriter(f'{args.out_root}/%05d.tar', maxcount=10000)
-        def sink_sample(sink: ShardWriter, ix: int, image, key) -> None:
+        makedirs(wds_out_dir, exist_ok=True)
+        sink_ctx = ShardWriter(f'{wds_out_dir}/%05d.tar', maxcount=10000)
+        w_mean = Welford(device=accelerator.device)
+        w_std = Welford(device=accelerator.device)
+        def sink_sample(sink: ShardWriter, ix: int, latent: FloatTensor, cls: int) -> None:
             out: SinkOutput = {
-                '__key__': f'{AcceleratorState().process_index}/{ix}',
-                'img.pth': image,
-                'txt': key
+                '__key__': str(ix),
+                'latent.pth': latent,
+                'cls': cls,
             }
             sink.write(out)
     else:
         sink_ctx = nullcontext()
-        sink_sample: Callable[[Optional[ShardWriter], int, object], None] = lambda *_: ...
+        sink_sample: Callable[[Optional[ShardWriter], int, FloatTensor, int], None] = lambda *_: ...
+        w_mean: Optional[Welford] = None
+        w_std: Optional[Welford] = None
 
-    it: Iterator[List[FloatTensor]] = iter(train_dl)
+    it: Iterator[List[Tensor]] = iter(train_dl)
     with sink_ctx as sink:
-        for batch in tqdm(it, total=batches_estimate):
-            images, *_ = batch
+        for batch_ix, batch in enumerate(tqdm(it, total=batches_estimate)):
+            assert isinstance(batch, list)
+            assert len(batch) == 2, "batch item was not the expected length of 2. perhaps class labels are missing. use dataset type imagefolder-class or wds-class, to get class labels."
+            images, classes = batch
             images = images.to(vae.dtype)
             # transform pipeline's ToTensor() gave us [0, 1]
             # but VAE wants [-1, 1]
             images.mul_(2).sub_(1)
             with inference_mode():
                 encoded: AutoencoderKLOutput = vae.encode(images)
-                dist: DiagonalGaussianDistribution = encoded.latent_dist
-                latents: FloatTensor = dist.sample(generator=latent_gen)
-                # you can verify correctness by saving the sample out like so:
-                #   from torchvision.utils import save_image
-                #   save_image(vae.decode(latents).sample.div(2).add_(.5).clamp_(0,1), 'test.png')
-                # let's not multiply by scale factor, and opt instead to measure a per-channel scale-and-shift
-                #   latents.mul_(vae.config.scaling_factor)
+            dist: DiagonalGaussianDistribution = encoded.latent_dist
+            latents: FloatTensor = dist.sample(generator=latent_gen)
+            accelerator.gather(latents)
+            # you can verify correctness by saving the sample out like so:
+            #   from torchvision.utils import save_image
+            #   save_image(vae.decode(latents).sample.div(2).add_(.5).clamp_(0,1), 'test.png')
+            # let's not multiply by scale factor. opt instead to measure a per-channel scale-and-shift
+            #   latents.mul_(vae.config.scaling_factor)
 
-            #We set image_key and class_cond_key in the CONFIG
-            #What we are storing is a random key, and the sample is a dict with two items
-            #That's image_key, image and class_cond_key, label. For us, the label needs to be extracted from the path
-            for ix, sample in enumerate(latents):
-                class_key = batch["paths"][ix].split("/")[-2] #This should be the name of the folder, which is just a random ID for us
-                sink_sample(sink_ctx, count, sample, class_key)
-                count += 1
+            if accelerator.is_main_process:
+                per_channel_means: FloatTensor = latents.mean((-1, -2))
+                per_channel_stds: FloatTensor = latents.std((-1, -2))
+                w_mean.add_all(per_channel_means)
+                w_std.add_all(per_channel_stds)
+
+                if batch_ix % args.log_average_every_n == 0:
+                    print('per-channel mean:', w_mean.mean)
+                    print('per-channel  std:', w_std.mean)
+                if batch_ix % args.save_average_every_n == 0:
+                    print(f'Saving averages to {avg_out_dir}')
+                    torch.save(w_mean.mean, f'{avg_out_dir}/mean.pt')
+                    torch.save(w_std.mean,  f'{avg_out_dir}/std.pt')
+
+            accelerator.gather(classes)
+            for sample_ix_in_batch, (latent, cls) in enumerate(zip(latents.unbind(), classes.unbind())):
+                sample_ix_in_corpus: int = batch_ix * args.batch_size + sample_ix_in_batch
+                sink_sample(sink, sample_ix_in_corpus, latent, cls.item())
+            del latents, per_channel_means, per_channel_stds
     print(f"r{accelerator.process_index} done")
+    if accelerator.is_main_process:
+        print(f'Saving averages to {avg_out_dir}')
+        torch.save(w_mean.mean, f'{avg_out_dir}/mean.pt')
+        torch.save(w_std.mean,  f'{avg_out_dir}/std.pt')
 
 if __name__ == '__main__':
     main()
