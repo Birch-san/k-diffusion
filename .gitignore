@@ -10,3 +10,4 @@ wandb/*
 .env
 *.safetensors
 /out/
+/shards/
