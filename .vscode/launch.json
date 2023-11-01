@@ -346,5 +346,24 @@
         "TORCHINDUCTOR_COMPILE_THREADS": "1",
       }
     },
+    {
+      "name": "Python: Preprocess latent dataset",
+      "type": "python",
+      "request": "launch",
+      "program": "imagenet_vae_loading.py",
+      "console": "integratedTerminal",
+      "justMyCode": false,
+      "subProcess": true,
+      "args": [
+        "--config", "configs/dataset/imagenet.juelich.jsonc",
+        "--batch-size", "4",
+        "--num-workers", "1",
+        "--start-method", "fork",
+      ],
+      "env": {
+        "K_DIFFUSION_USE_COMPILE": "0",
+        "TORCHINDUCTOR_COMPILE_THREADS": "1",
+      }
+    },
   ]
 }
