@@ -1,7 +1,7 @@
 {
   "model": { "type": "none" },
   "dataset": {
-    "type": "wds",
+    "type": "wds-class",
     "location": "/p/fastdata/mmlaion/imagenet-1K-webdataset/train/{00000..01023}.tar",
     "wds_image_key": "jpg",
     "class_cond_key": "cls",
