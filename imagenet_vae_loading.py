@@ -189,16 +189,16 @@ def main():
                 encoded: AutoencoderKLOutput = vae.encode(images)
             dist: DiagonalGaussianDistribution = encoded.latent_dist
             latents: FloatTensor = dist.sample(generator=latent_gen)
-            accelerator.gather(latents)
+            all_latents: FloatTensor = accelerator.gather(latents)
             # you can verify correctness by saving the sample out like so:
             #   from torchvision.utils import save_image
-            #   save_image(vae.decode(latents).sample.div(2).add_(.5).clamp_(0,1), 'test.png')
+            #   save_image(vae.decode(all_latents).sample.div(2).add_(.5).clamp_(0,1), 'test.png')
             # let's not multiply by scale factor. opt instead to measure a per-channel scale-and-shift
-            #   latents.mul_(vae.config.scaling_factor)
+            #   all_latents.mul_(vae.config.scaling_factor)
 
             if accelerator.is_main_process:
-                per_channel_means: FloatTensor = latents.mean((-1, -2))
-                per_channel_stds: FloatTensor = latents.std((-1, -2))
+                per_channel_means: FloatTensor = all_latents.mean((-1, -2))
+                per_channel_stds: FloatTensor = all_latents.std((-1, -2))
                 w_mean.add_all(per_channel_means)
                 w_std.add_all(per_channel_stds)
 
@@ -209,12 +209,13 @@ def main():
                     print(f'Saving averages to {avg_out_dir}')
                     torch.save(w_mean.mean, f'{avg_out_dir}/mean.pt')
                     torch.save(w_std.mean,  f'{avg_out_dir}/std.pt')
+                del per_channel_means, per_channel_stds
 
-            accelerator.gather(classes)
-            for sample_ix_in_batch, (latent, cls) in enumerate(zip(latents.unbind(), classes.unbind())):
+            all_classes: FloatTensor = accelerator.gather(classes)
+            for sample_ix_in_batch, (latent, cls) in enumerate(zip(all_latents.unbind(), all_classes.unbind())):
                 sample_ix_in_corpus: int = batch_ix * args.batch_size + sample_ix_in_batch
                 sink_sample(sink, sample_ix_in_corpus, latent, cls.item())
-            del latents
+            del all_latents, latents, all_classes, classes
     print(f"r{accelerator.process_index} done")
     if accelerator.is_main_process:
         print(f'Saving averages to {avg_out_dir}')
