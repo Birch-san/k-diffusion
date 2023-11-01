@@ -384,6 +384,7 @@
         "--num-workers", "8",
         "--log-average-every-n", "25",
         "--save-average-every-n", "250",
+        "--out-root", "/p/scratch/ccstdl/birch1/dataset-out/imagenet-latents",
         "--start-method", "fork",
       ],
       "env": {
