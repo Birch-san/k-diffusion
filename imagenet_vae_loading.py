@@ -25,7 +25,7 @@ from kdiff_trainer.vae.attn.qkv_fusion import fuse_vae_qkv
 SinkOutput = TypedDict('SinkOutput', {
   '__key__': str,
   'latent.pth': FloatTensor,
-  'cls': bytes,
+  'cls.txt': str,
 })
 
 def ensure_distributed():
@@ -41,7 +41,7 @@ def main():
                    help='the batch size')
     p.add_argument('--num-workers', type=int, default=8,
                    help='the number of data loader workers')
-    p.add_argument('--side-length', type=int, default=256,
+    p.add_argument('--side-length', type=int, default=512,
                    help='square side length to which to resize-and-crop image')
     p.add_argument('--seed', type=int,
                    help='the random seed')
@@ -96,7 +96,6 @@ def main():
         tf=tf,
         class_captions=None,
     )
-    # this is just to try and get a good progress bar.
     try:
         dataset_len_estimate: int = len(train_set)
     except TypeError:
@@ -104,11 +103,8 @@ def main():
         if 'estimated_samples' in dataset_config:
             dataset_len_estimate: int = dataset_config['estimated_samples']
         else:
-            dataset_len_estimate: Optional[int] = None
-    if dataset_len_estimate is None:
-        batches_estimate: Optional[int] = None
-    else:
-        batches_estimate: int = math.ceil(dataset_len_estimate/args.batch_size)
+            raise ValueError("we need to know how the dataset is, in order to avoid the bias introduced by DataLoader's wraparound (it tries to ensure consistent batch size by drawing samples from a new epoch)")
+    batches_estimate: int = math.ceil(dataset_len_estimate/(args.batch_size*accelerator.num_processes))
 
     train_dl = data.DataLoader(train_set, args.batch_size, shuffle=not isinstance(train_set, data.IterableDataset), drop_last=False,
                                num_workers=args.num_workers, persistent_workers=True, pin_memory=True)
@@ -166,7 +162,7 @@ def main():
             out: SinkOutput = {
                 '__key__': str(ix),
                 'latent.pth': latent,
-                'cls': cls,
+                'cls.txt': str(cls),
             }
             sink.write(out)
     else:
@@ -213,8 +209,11 @@ def main():
 
             all_classes: FloatTensor = accelerator.gather(classes)
             for sample_ix_in_batch, (latent, cls) in enumerate(zip(all_latents.unbind(), all_classes.unbind())):
-                sample_ix_in_corpus: int = batch_ix * args.batch_size + sample_ix_in_batch
-                sink_sample(sink, sample_ix_in_corpus, latent, cls.item())
+                sample_ix_in_corpus: int = batch_ix * args.batch_size * accelerator.num_processes + sample_ix_in_batch
+                if sample_ix_in_corpus > dataset_len_estimate:
+                    break
+                # it's crucial to transfer the _sample_ to CPU, not the batch. otherwise each sample we serialize, has the whole batch's data hanging off it
+                sink_sample(sink, sample_ix_in_corpus, latent.cpu(), cls.item())
             del all_latents, latents, all_classes, classes
     print(f"r{accelerator.process_index} done")
     if accelerator.is_main_process:
