@@ -72,6 +72,7 @@ class DatasetConfig(TypedDict):
     type: str
     location: NotRequired[str]
     image_key: NotRequired[str]
+    wds_image_key: NotRequired[str]
     class_cond_key: NotRequired[str]
     get_dataset: NotRequired[GetDataset]
 

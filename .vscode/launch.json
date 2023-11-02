@@ -347,6 +347,17 @@
       }
     },
     {
+      "name": "Python: Read preprocessed latent dataset",
+      "type": "python",
+      "request": "launch",
+      "program": "read_latent_dataset.py",
+      "console": "integratedTerminal",
+      "justMyCode": false,
+      "subProcess": true,
+      "args": [],
+      "env": {}
+    },
+    {
       "name": "Python: Preprocess latent dataset",
       "type": "python",
       "request": "launch",

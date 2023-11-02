@@ -1,0 +1,13 @@
+{
+  "model": { "type": "none" },
+  "dataset": {
+    "type": "wds-class",
+    "latents": true,
+    "location": "/p/scratch/ccstdl/birch1/dataset-out/imagenet-latents/wds/00000.tar",
+    "wds_latent_key": "latent.pth",
+    "class_cond_key": "cls.txt",
+    "num_classes": 1000,
+    "classes_to_captions": "imagenet-1k",
+    "estimated_samples": 1281167
+  }
+}
