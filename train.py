@@ -499,9 +499,9 @@ def main():
                 fid_obj = FrechetInceptionDistance(feature=2048, normalize=True, reset_real_features=False)
                 fid_obj.to(accelerator.device)
             def observe_samples(real: bool, samples: FloatTensor) -> None:
-                accelerator.gather(samples)
+                all_samples: FloatTensor = accelerator.gather(samples)
                 if accelerator.is_main_process:
-                    fid_obj.update(samples, real=real)
+                    fid_obj.update(all_samples, real=real)
             observe_samples_real: Callable[[FloatTensor], None] = partial(observe_samples, True)
             observe_samples_fake: Callable[[FloatTensor], None] = partial(observe_samples, False)
         else:
