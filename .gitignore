@@ -10,3 +10,5 @@ wandb/*
 .env
 *.safetensors
 /out/
+/out-srun/
+/log/
