@@ -774,7 +774,7 @@ def main():
                 sink_ctx = nullcontext()
                 sink_sample: Callable[[Optional[ShardWriter], int, Sample], None] = lambda *_: ...
             with sink_ctx as sink:
-                for batch_ix, samples in enumerate(tqdm(
+                for batch_ix, batch in enumerate(tqdm(
                     # collating into batches just to get a more reliable progress report from tqdm
                     batched(samples, args.sample_n),
                     'sampling batches',
@@ -783,8 +783,9 @@ def main():
                     total=math.ceil(args.inference_n/args.sample_n),
                     unit='batch',
                 )):
-                    for ix, sample in enumerate(samples):
-                        sink_sample(sink, args.sample_n*batch_ix + ix, sample)
+                    for ix, sample in enumerate(batch):
+                        corpus_ix: int = args.sample_n*batch_ix + ix
+                        sink_sample(sink, corpus_ix, sample)
         if accelerator.is_main_process:
             tqdm.write('Finished inferencing!')
         return
