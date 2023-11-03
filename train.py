@@ -52,8 +52,14 @@ from kdiff_trainer.dataset_meta.get_class_captions import get_class_captions, Cl
 from kdiff_trainer.dataset.get_dataset import get_dataset
 
 SinkOutput = TypedDict('SinkOutput', {
-  '__key__': str,
-  'img.png': Image.Image,
+    '__key__': str,
+    'img.png': Image.Image,
+})
+
+ClassCondSinkOutput = TypedDict('ClassCondSinkOutput', {
+    '__key__': str,
+    'img.png': Image.Image,
+    'cls.txt': str,
 })
 
 @dataclass
@@ -751,10 +757,10 @@ def main():
                 shard_qualifier: Optional[str] = '' if args.inference_out_wds_shard is None else f'{args.inference_out_wds_shard}/'
                 if num_classes:
                     def sink_sample(sink: ShardWriter, ix: int, sample: ClassConditionalSample) -> None:
-                        out: SinkOutput = {
+                        out: ClassCondSinkOutput = {
                             '__key__': f'{shard_qualifier}{ix}',
                             'img.png': sample.pil,
-                            'class_cond.npy': np.array(sample.class_cond),
+                            'cls.txt': str(sample.class_cond),
                         }
                         sink.write(out)
                 else:
