@@ -72,20 +72,11 @@ SAMPLER="${sampler:-dpm3}"
 BATCH_PER_GPU="${batch_per_gpu:-128}"
 
 SAMPLES_TOTAL="${inference_n:-50000}"
-SAMPLES_PER_NODE_FLOOR="$((SAMPLES_TOTAL/SLURM_JOB_NUM_NODES))"
-SAMPLES_PER_NODE_REMAINDER="$((SAMPLES_TOTAL%SLURM_JOB_NUM_NODES))"
-if [[ "$SLURM_PROCID" == "0" ]]; then
-  MY_SAMPLE_COUNT="$((SAMPLES_PER_NODE_FLOOR+SAMPLES_PER_NODE_REMAINDER))"
-else
-  MY_SAMPLE_COUNT="$SAMPLES_PER_NODE_FLOOR"
-fi
 
 if [[ "$prototyping" == "true" ]]; then
   # get results a few seconds faster by skipping compile.
   export K_DIFFUSION_USE_COMPILE=0
 fi
-
-echo "slurm proc $SLURM_PROCID will generate $MY_SAMPLE_COUNT of $SAMPLES_TOTAL samples."
 
 WDS_OUT_DIR="$wds_out_root/cfg$CFG_SCALE"
 
@@ -108,6 +99,7 @@ echo "wds_out_root: $wds_out_root"
 echo "CFG_SCALE: $CFG_SCALE"
 echo "SAMPLER: $SAMPLER"
 echo "STEPS: $STEPS"
+echo "SAMPLES_TOTAL: $SAMPLES_TOTAL"
 echo "kdiff_dir: $kdiff_dir"
 
 echo "SLURM_JOB_NUM_NODES: $SLURM_JOB_NUM_NODES"
@@ -135,6 +127,6 @@ train.py \
 --cfg-scale "$CFG_SCALE" \
 --inference-only \
 --sample-n "$CUMULATIVE_BATCH" \
---inference-n "$MY_SAMPLE_COUNT" \
+--inference-n "$SAMPLES_TOTAL" \
 --inference-out-wds-root "$WDS_OUT_DIR" \
 >"$OUT_TXT" 2>"$ERR_TXT"
