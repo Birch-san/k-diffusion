@@ -584,7 +584,8 @@ def main():
         x_0 = accelerator.gather(x_0)[:args.sample_n]
         if class_cond is None:
             return Samples(x_0)
-        return ClassConditionalSamples(x_0, class_cond.flatten(end_dim=1)[:args.sample_n])
+        class_cond = class_cond.flatten(end_dim=1)[:args.sample_n]
+        return ClassConditionalSamples(x_0, class_cond)
     
     @torch.inference_mode() # note: inference_mode is lower-overhead than no_grad but disables forward-mode AD
     @K.utils.eval_mode(model_ema)
