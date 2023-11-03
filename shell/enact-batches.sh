@@ -1,13 +1,25 @@
 #!/usr/bin/env bash
 set -eo pipefail -o xtrace
 
-# rm -rf --interactive=never ~/home/shell/out
-# mkdir ~/home/shell/out
+TLD="${HOSTNAME##*.}"
+case "$TLD" in
+  'juwels')
+    # booster
+    EVAL_PARTITION='develbooster' ;;
+  'jureca')
+    # dc-gpu
+    EVAL_PARTITION='dc-gpu-devel' ;;
+  *)
+    raise "was not able to infer from your hostname's TLD which partition to schedule follow-up FID compute job"
+esac
 
-JOB_ID="$(~/home/shell/batch.sh \
--t '00:30:00' \
+SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
+
+WDS_OUT_ROOT='/p/scratch/ccstdl/birch1/model-out/kat_557M_2M'
+JOB_ID="$("$SCRIPT_DIR/batch.sh" \
+-t '00:15:00' \
 -n 2 \
-inference-multinode.sh \
+"$SCRIPT_DIR/inference-multinode.sh" \
 --prototyping \
 --log-root='/p/scratch/ccstdl/birch1/batch-log/kat_557M_2M' \
 --config='configs/config_557M.jsonc' \
@@ -16,14 +28,23 @@ inference-multinode.sh \
 --sampler='dpm3' \
 --steps=25 \
 --batch-per-gpu=5 \
---inference-n=25 \
---wds-out-root='/p/scratch/ccstdl/birch1/model-out/kat_557M_2M' \
+--inference-n=70 \
+--wds-out-root="$WDS_OUT_ROOT" \
 --kdiff-dir='/p/project/ccstdl/birch1/git/k-diffusion' \
 --ddp-config='/p/home/jusers/birch1/juwels/.cache/huggingface/accelerate/ddp.yaml')"
 
-# exec tail -F ~/home/shell/out/{out,err}.txt
-
-# 4 GPUS
-# 4 * 5 = 20
-# 2 nodes
-# 2 * 4 * 5 = 40
+srun --nodes=1 \
+-o /p/scratch/ccstdl/birch1/batch-log/test-jobdep-srun.out.txt \
+-e /p/scratch/ccstdl/birch1/batch-log/test-jobdep-srun.err.txt \
+-A cstdl \
+--partition "$EVAL_PARTITION" \
+--gres gpu \
+--job-name=evaluate-samples \
+--exclusive \
+--threads-per-core=1 \
+--cpus-per-task=64 \
+--mem=0 \
+--time=00:05:00 \
+--dependency="afterok:$JOB_ID" \
+"$SCRIPT_DIR/test-jobdep.sh" \
+--wds-out-root="$WDS_OUT_ROOT"
