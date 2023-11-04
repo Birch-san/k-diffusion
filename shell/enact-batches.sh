@@ -35,18 +35,18 @@ echo "IMAGE_SIZE (inferred from parsing MODEL_CONFIG): '$IMAGE_SIZE'"
 INFERENCE_JOB_ID="$("$SCRIPT_DIR/batch.sh" \
 -o "$LOG_DIR/inference-srun.out.txt" \
 -e "$LOG_DIR/inference-srun.err.txt" \
+-p dc-gpu \
 --job-name='inference' \
--t '00:15:00' \
--n 2 \
+-t '01:00:00' \
+-n 5 \
 "$SCRIPT_DIR/inference-multinode.sh" \
---prototyping \
 --log-dir="$LOG_DIR" \
 --config="$MODEL_CONFIG" \
 --ckpt="$MODEL_CKPT" \
 --cfg-scale="$CFG_SCALE" \
 --sampler='dpm3' \
---steps=25 \
---batch-per-gpu=5 \
+--steps=50 \
+--batch-per-gpu=128 \
 --inference-n="$SAMPLE_COUNT" \
 --wds-out-dir="$WDS_OUT_DIR" \
 --kdiff-dir="$KDIFF_DIR" \
@@ -68,4 +68,5 @@ METRICS_JOB_ID="$("$SCRIPT_DIR/batch.sh" \
 --evaluate-with='dinov2' \
 --image-size="$IMAGE_SIZE" \
 --kdiff-dir="$KDIFF_DIR" \
+--torchmetrics-fid \
 --ddp-config="$DDP_CONFIG")"
