@@ -32,7 +32,7 @@ partition="$DEFAULT_PARTITION"
 time_="02:00:00"
 
 # https://stackoverflow.com/a/28466267/5257399
-while getopts o:e:n:J:A:p:t: OPT; do
+while getopts o:e:n:J:A:p:t:d:-: OPT; do
   if [ "$OPT" = "-" ]; then   # long option: reformulate OPT and OPTARG
     OPT="${OPTARG%%=*}"       # extract long option name
     OPTARG="${OPTARG#$OPT}"   # extract long option argument (may be empty)
@@ -46,6 +46,7 @@ while getopts o:e:n:J:A:p:t: OPT; do
     A | account )  account="${OPTARG}" ;;
     p | partition )  partition="${OPTARG}" ;;
     t | time )  time_="${OPTARG}" ;;
+    d | dependency )  dependency="${OPTARG}" ;;
     ??* )          die "Illegal option --$OPT" ;;            # bad long option
     ? )            exit 2 ;;  # bad short option (error reported via getopts)
   esac
@@ -70,7 +71,12 @@ echo >&2 "with args: $SCRIPT_ARGS"
 # https://apps.fz-juelich.de/jsc/hps/juwels/affinity.html#processor-affinity
 CPUS_PER_TASK=64
 
-exec sbatch --parsable <<EOT
+SBATCH_VARARGS=()
+if [[ -n "$dependency" ]]; then
+  SBATCH_VARARGS=(${SBATCH_VARARGS[@]} "--dependency=$dependency")
+fi
+
+exec sbatch "${SBATCH_VARARGS[@]}" --parsable <<EOT
 #!/bin/sh
 
 #SBATCH -o "$out"

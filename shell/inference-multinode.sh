@@ -65,12 +65,12 @@ fi
 
 echo "all required args found."
 
-CFG_SCALE="${cfg_scale:-'1.00'}"
-STEPS="${steps:-50}"
-SAMPLER="${sampler:-dpm3}"
-BATCH_PER_GPU="${batch_per_gpu:-128}"
+: "${cfg_scale:='1.00'}"
+: "${steps:=50}"
+: "${sampler:=dpm3}"
+: "${batch_per_gpu:=128}"
 
-SAMPLES_TOTAL="${inference_n:-50000}"
+: "${inference_n:=50000}"
 
 if [[ "$prototyping" == "true" ]]; then
   # get results a few seconds faster by skipping compile.
@@ -87,15 +87,15 @@ echo "writing output to: $OUT_TXT"
 echo "writing errors to: $ERR_TXT"
 
 NUM_PROCESSES="$(( "$GPUS_PER_NODE" * "$SLURM_JOB_NUM_NODES" ))"
-CUMULATIVE_BATCH="$(( "$BATCH_PER_GPU" * "$NUM_PROCESSES" ))"
+CUMULATIVE_BATCH="$(( "$batch_per_gpu" * "$NUM_PROCESSES" ))"
 
 echo "ckpt: $ckpt"
 echo "config: $config"
 echo "wds_out_dir: $wds_out_dir"
-echo "CFG_SCALE: $CFG_SCALE"
-echo "SAMPLER: $SAMPLER"
-echo "STEPS: $STEPS"
-echo "SAMPLES_TOTAL: $SAMPLES_TOTAL"
+echo "cfg_scale: $cfg_scale"
+echo "sampler: $sampler"
+echo "steps: $steps"
+echo "inference_n: $inference_n"
 echo "kdiff_dir: $kdiff_dir"
 
 echo "SLURM_JOB_NUM_NODES: $SLURM_JOB_NUM_NODES"
@@ -118,9 +118,11 @@ train.py \
 --config "$config" \
 --name inference \
 --resume-inference "$ckpt" \
---cfg-scale "$CFG_SCALE" \
+--cfg-scale "$cfg_scale" \
 --inference-only \
+--demo-steps "$steps" \
+--sampler-preset "$sampler" \
 --sample-n "$CUMULATIVE_BATCH" \
---inference-n "$SAMPLES_TOTAL" \
+--inference-n "$inference_n" \
 --inference-out-wds-root "$wds_out_dir" \
 >"$OUT_TXT" 2>"$ERR_TXT"
