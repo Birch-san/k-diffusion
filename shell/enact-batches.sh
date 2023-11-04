@@ -43,6 +43,9 @@ case "$TLD" in
 esac
 
 INFERENCE_JOB_ID="$("$SCRIPT_DIR/batch.sh" \
+-o "$LOG_DIR/inference-srun.out.txt" \
+-e "$LOG_DIR/inference-srun.err.txt" \
+--job-name='inference' \
 -t '00:15:00' \
 -n 2 \
 "$SCRIPT_DIR/inference-multinode.sh" \
@@ -59,18 +62,12 @@ INFERENCE_JOB_ID="$("$SCRIPT_DIR/batch.sh" \
 --kdiff-dir="$KDIFF_DIR" \
 --ddp-config="$DDP_CONFIG")"
 
-srun --nodes=1 \
+METRICS_JOB_ID="$("$SCRIPT_DIR/batch.sh" \
 -o "$LOG_DIR/compute-metrics-srun.out.txt" \
 -e "$LOG_DIR/compute-metrics-srun.err.txt" \
--A cstdl \
---partition "$EVAL_PARTITION" \
---gres gpu \
+-n 1 \
 --job-name='evaluate-samples' \
---exclusive \
---threads-per-core=1 \
---cpus-per-task=64 \
---mem=0 \
---time=00:30:00 \
+-t '00:30:00' \
 --dependency="afterok:$INFERENCE_JOB_ID" \
 "$SCRIPT_DIR/compute-metrics.sh" \
 --wds-in-dir="$WDS_OUT_DIR" \
@@ -79,4 +76,4 @@ srun --nodes=1 \
 --dataset-config-out-path="configs/dataset/pred/$JOB_QUALIFIER.jsonc" \
 --image-size="$IMAGE_SIZE" \
 --kdiff-dir="$KDIFF_DIR" \
---ddp-config="$DDP_CONFIG" &
+--ddp-config="$DDP_CONFIG")"

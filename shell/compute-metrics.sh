@@ -68,9 +68,9 @@ fi
 
 echo "all required args found."
 
-EVALUATE_N="${evaluate_n:-50000}"
-BATCH_PER_GPU="${batch_per_gpu:-128}"
-EVALUATE_WITH="${evaluate_with:-dinov2}"
+: "${evaluate_n:=50000}"
+: "${batch_per_gpu:=128}"
+: "${evaluate_with:=dinov2}"
 
 set +e
 TAR_LINES="$(find -L "$wds_in_dir" -maxdepth 1 -type f -name '*.tar' -execdir basename {} .tar ';' | grep -E '^[0-9]+$' | sort)"
@@ -107,7 +107,7 @@ set -o xtrace
 
 CONFIG_JSON="$(jq -n \
 --arg 'imageSize' "$image_size" \
---arg 'wdsPattern' "$WDS_IN_DIR/$TARS" \
+--arg 'wdsPattern' "$wds_in_dir/$TARS" \
 "$CONFIG_TEMPLATE")"
 
 cd "$kdiff_dir"
@@ -116,23 +116,24 @@ mkdir -p "$(dirname "$dataset_config_out_path")" "$log_dir"
 
 echo "$CONFIG_JSON" > "$dataset_config_out_path"
 
-OUT_TXT="$log_dir/compute-metrics.out.txt"
-ERR_TXT="$log_dir/compute-metrics.err.txt"
-
-echo "writing output to: $OUT_TXT"
-echo "writing errors to: $ERR_TXT"
-
 VARARGS=()
 if [[ "$torchmetrics_fid" == "true" ]]; then
   VARARGS=(${VARARGS[@]} --torchmetrics-fid)
 fi
 
+: "${SLURM_PROCID:=0}"
 : "${GPUS_PER_NODE:=4}"
 : "${SLURM_JOB_NUM_NODES:=1}"
 NUM_PROCESSES="$(( "$GPUS_PER_NODE" * "$SLURM_JOB_NUM_NODES" ))"
 
+OUT_TXT="$log_dir/compute-metrics.out.$SLURM_PROCID.txt"
+ERR_TXT="$log_dir/compute-metrics.err.$SLURM_PROCID.txt"
+
+echo "writing output to: $OUT_TXT"
+echo "writing errors to: $ERR_TXT"
+
 ACC_VARARGS=()
-if [[ -n "$SLURM_LAUNCH_NODE_IPADDR" ]]; then
+if [[ -n "$MAIN_PROCESS_PORT" ]]; then
   ACC_VARARGS=(
     ${ACC_VARARGS[@]}
     --machine_rank "$SLURM_PROCID"
@@ -149,7 +150,7 @@ K_DIFFUSION_USE_COMPILE=0 exec python -m accelerate.commands.launch \
 compute_metrics.py \
 --config-pred "$dataset_config_out_path" \
 --config-target "$config_target" \
---batch-size "$BATCH_PER_GPU" \
+--batch-size "$batch_per_gpu" \
 --evaluate-n "$evaluate_n" \
 --evaluate-with "$evaluate_with" \
 "${VARARGS[@]}" \
