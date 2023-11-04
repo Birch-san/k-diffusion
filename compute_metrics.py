@@ -135,7 +135,7 @@ def main():
         features: Dict[ExtractorName, Dict[Literal['pred', 'target'], List[FloatTensor]]] = {
             extractor: { 'pred': [], 'target': [] } for extractor in extractors.keys()
         }
-    for subject, iter_ in zip(('pred', 'target'), (pred_train_dl, target_train_dl)):
+    for subject, iter_ in zip(('pred', 'target'), (pred_train_iter, target_train_iter)):
         # batch sizes from torch dataloader are not *necessarily* equal to the args.batch_size you requested!
         # dataloaders based on webdataset will give a smaller batch when they exhaust a .tar shard.
         total_samples = 0
