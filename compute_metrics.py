@@ -121,75 +121,49 @@ def main():
     pred_train_iter: Iterator[List[FloatTensor]] = iter(pred_train_dl)
     target_train_iter: Iterator[List[FloatTensor]] = iter(target_train_dl)
     if args.torchmetrics_fid:
-        from torchmetrics.image.fid import FrechetInceptionDistance, NoTrainInceptionV3
+        from kdiff_trainer.fid_distributed import FIDDistributed
         # "normalize" means "my images are [0, 1] floats"
         normalize=True
         # https://torchmetrics.readthedocs.io/en/stable/image/frechet_inception_distance.html
-        fid_obj = FrechetInceptionDistance(feature=2048, normalize=normalize)
-        fid_obj: FrechetInceptionDistance = accelerator.prepare(fid_obj)
-        inception: NoTrainInceptionV3 = fid_obj.inception
-        # first part of FrechetInceptionDistance#update
-        def compute_features(imgs: FloatTensor) -> FloatTensor:
-            imgs = (imgs * 255).byte() if normalize else imgs
-            features: FloatTensor = inception(imgs)
-            return accelerator.gather(features)
-
-        if accelerator.is_main_process:
-            # this is just FrechetInceptionDistance#update, except with support for gather.
-            # only main process accumulates.
-            def update_torchmetrics_fid(imgs: FloatTensor, real: bool) -> None:
-                features: FloatTensor = compute_features(imgs)
-                fid_obj.orig_dtype = features.dtype
-                features = features.double()
-                if features.dim() == 1:
-                    features = features.unsqueeze(0)
-                sum = features.sum(dim=0)
-                cov_sum = features.t().mm(features)
-                num_samples: int = features.shape[0]
-                if real:
-                    fid_obj.real_features_sum += sum
-                    fid_obj.real_features_cov_sum += cov_sum
-                    fid_obj.real_features_num_samples += num_samples
-                else:
-                    fid_obj.fake_features_sum += sum
-                    fid_obj.fake_features_cov_sum += cov_sum
-                    fid_obj.fake_features_num_samples += num_samples
-        else:
-            del fid_obj
-            def update_torchmetrics_fid(imgs: FloatTensor, _) -> None:
-                # participate in gather
-                compute_features(imgs)
-    else:
-        def update_torchmetrics_fid(*_) -> None: pass
-    samples_per_batch_all_proc: int = args.batch_size * accelerator.num_processes
-    batches_per_proc: int = math.ceil(args.evaluate_n / samples_per_batch_all_proc)
+        fid_obj = FIDDistributed(accelerator, feature=2048, normalize=normalize)
+        fid_obj: FIDDistributed = accelerator.prepare(fid_obj)
     if accelerator.is_main_process:
         features: Dict[ExtractorName, Dict[Literal['pred', 'target'], List[FloatTensor]]] = {
             extractor: { 'pred': [], 'target': [] } for extractor in extractors.keys()
         }
     for subject, iter_ in zip(('pred', 'target'), (pred_train_iter, target_train_iter)):
-        for batch_ix, batch in enumerate(tqdm(
-            islice(iter_, batches_per_proc),
+        # batch sizes from torch dataloader are not *necessarily* equal to the args.batch_size you requested!
+        # dataloaders based on webdataset will give a smaller batch when they exhaust a .tar shard.
+        total_samples = 0
+        with tqdm(
             f'Computing features for {subject}...',
+            total=args.evaluate_n,
             disable=not accelerator.is_main_process,
             position=0,
-            total=batches_per_proc,
-            unit='batch',
-        )):
-            samples, *_ = batch
-            curr_total: int = batch_ix * samples_per_batch_all_proc
-            samples_remaining: int = args.evaluate_n-curr_total
-            # (optimization): use a smaller per-proc batch when possible for the final batch
-            curr_batch_per_proc: int = min(args.batch_size, math.ceil(samples_remaining / accelerator.num_processes))
-            samples = samples[:curr_batch_per_proc]
-            for extractor_name, extractor in extractors.items():
-                extracted: FloatTensor = extractor(samples)
-                extracted = accelerator.gather(extracted)
-                if accelerator.is_main_process:
-                    extracted = extracted[:min(samples_per_batch_all_proc, samples_remaining)]
-                    features[extractor_name][subject].append(extracted)
-                del extracted
-            update_torchmetrics_fid(samples, subject == 'target')
+            unit='samp',
+        ) as pbar:
+            for batch in iter_:
+                samples, *_ = batch
+                samples_remaining: int = args.evaluate_n-total_samples
+                # (optimization): use a smaller per-proc batch if possible (only relevant for the final batch)
+                curr_batch_per_proc: int = min(samples.shape[0], math.ceil(samples_remaining / accelerator.num_processes))
+                samples = samples[:curr_batch_per_proc]
+                # we may be forced to overshoot in order to give every process an equal batch size. we discard the excess.
+                samples_kept: int = min(curr_batch_per_proc * accelerator.num_processes, samples_remaining)
+                for extractor_name, extractor in extractors.items():
+                    extracted: FloatTensor = extractor(samples)
+                    extracted = accelerator.gather(extracted)
+                    if accelerator.is_main_process:
+                        extracted = extracted[:samples_kept]
+                        features[extractor_name][subject].append(extracted)
+                    del extracted
+                if args.torchmetrics_fid:
+                    fid_obj.update(samples, subject == 'target')
+                total_samples += samples_kept
+                pbar.update(samples_kept)
+                assert total_samples <= args.evaluate_n
+                if total_samples == args.evaluate_n:
+                    break
     if accelerator.is_main_process:
         # using new variable name rather than reassigning, to get type inference to use the new type
         features_: Dict[ExtractorName, Dict[Literal['pred', 'target'], FloatTensor]] = {
@@ -202,8 +176,8 @@ def main():
             fid: FloatTensor = fid_obj.compute()
             print(f'torchmetrics, {fid_obj.fake_features_num_samples} samples:')
             print(f'  FID: {fid.item()}')
-            assert fid_obj.fake_features_num_samples == args.evaluate_n, f"[torchmetrics FID] you requested --evaluate-n={args.evaluate_n}, but we found {fid_obj.fake_features_num_samples} samples. perhaps the final batch was skipped due to rounding problems. try ensuring that evaluate_n is divisible by batch_size*procs without a remainder, or try simplifying the multi-processing (i.e. single-node or single-GPU)."
-            assert fid_obj.fake_features_num_samples == fid_obj.real_features_num_samples, f"[torchmetrics FID] somehow we have a mismatch between number of ground-truth samples ({fid_obj.real_features_num_samples}) and model-predicted samples ({fid_obj.fake_features_num_samples})."
+            assert fid_obj.fake_features_num_samples.item() == args.evaluate_n, f"[torchmetrics FID] you requested --evaluate-n={args.evaluate_n}, but we found {fid_obj.fake_features_num_samples} samples. perhaps the final batch was skipped due to rounding problems. try ensuring that evaluate_n is divisible by batch_size*procs without a remainder, or try simplifying the multi-processing (i.e. single-node or single-GPU)."
+            assert fid_obj.fake_features_num_samples.item() == fid_obj.real_features_num_samples.item(), f"[torchmetrics FID] somehow we have a mismatch between number of ground-truth samples ({fid_obj.real_features_num_samples}) and model-predicted samples ({fid_obj.fake_features_num_samples})."
         for extractor_name, features_by_subject in features_.items():
             pred, target = features_by_subject['pred'], features_by_subject['target']
             initial: Literal['I', 'C', 'D'] = extractor_name[0].upper()
