@@ -12,6 +12,8 @@ CFG_SCALE='1.00'
 REALS_DATASET_CONFIG="configs/dataset/imagenet.juelich.jsonc"
 DDP_CONFIG='/p/home/jusers/birch1/juwels/.cache/huggingface/accelerate/ddp.yaml'
 
+SAMPLE_COUNT=50000
+
 LOG_ROOT='/p/scratch/ccstdl/birch1/batch-log'
 SAMPLES_OUT_ROOT='/p/scratch/ccstdl/birch1/model-out'
 
@@ -30,18 +32,6 @@ if [[ ! "$IMAGE_SIZE" =~ ^[0-9]+$ ]]; then
 fi
 echo "IMAGE_SIZE (inferred from parsing MODEL_CONFIG): '$IMAGE_SIZE'"
 
-TLD="${HOSTNAME##*.}"
-case "$TLD" in
-  'juwels')
-    # booster
-    EVAL_PARTITION='develbooster' ;;
-  'jureca')
-    # dc-gpu
-    EVAL_PARTITION='dc-gpu-devel' ;;
-  *)
-    raise "was not able to infer from your hostname's TLD which partition to schedule follow-up FID compute job"
-esac
-
 INFERENCE_JOB_ID="$("$SCRIPT_DIR/batch.sh" \
 -o "$LOG_DIR/inference-srun.out.txt" \
 -e "$LOG_DIR/inference-srun.err.txt" \
@@ -57,7 +47,7 @@ INFERENCE_JOB_ID="$("$SCRIPT_DIR/batch.sh" \
 --sampler='dpm3' \
 --steps=25 \
 --batch-per-gpu=5 \
---inference-n=70 \
+--inference-n="$SAMPLE_COUNT" \
 --wds-out-dir="$WDS_OUT_DIR" \
 --kdiff-dir="$KDIFF_DIR" \
 --ddp-config="$DDP_CONFIG")"
@@ -74,6 +64,8 @@ METRICS_JOB_ID="$("$SCRIPT_DIR/batch.sh" \
 --config-target="$REALS_DATASET_CONFIG" \
 --log-dir="$LOG_DIR" \
 --dataset-config-out-path="configs/dataset/pred/$JOB_QUALIFIER.jsonc" \
+--evaluate-n="$SAMPLE_COUNT" \
+--evaluate-with='dinov2' \
 --image-size="$IMAGE_SIZE" \
 --kdiff-dir="$KDIFF_DIR" \
 --ddp-config="$DDP_CONFIG")"
