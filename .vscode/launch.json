@@ -276,17 +276,48 @@
       "request": "launch",
       "program": "compute_metrics.py",
       "console": "integratedTerminal",
-      "justMyCode": true,
+      "justMyCode": false,
       "subProcess": false,
       "args": [
         "--config-pred", "configs/dataset/pred/557M_cfg1.00.juelich.jsonc",
         "--config-target", "configs/dataset/imagenet.juelich.jsonc",
         "--evaluate-n", "50000",
-        "--batch-size", "250",
+        "--batch-size", "768",
         "--start-method", "fork",
         "--torchmetrics-fid",
-        "--evaluate-with", "dinov2"
-      ]
+        "--mixed-precision", "fp16",
+        "--evaluate-with", "inception", "dinov2"
+      ],
+      "env": {
+        "K_DIFFUSION_USE_COMPILE": "0"
+      },
+    },
+    {
+      // note: dataloader seems to get exhausted prematurely, so this just doesn't work
+      "name": "Python: Evaluate 557M (accelerate)",
+      "type": "python",
+      "request": "launch",
+      "module": "accelerate.commands.launch",
+      "console": "integratedTerminal",
+      "justMyCode": false,
+      "subProcess": false,
+      "args": [
+        "--config_file", "/p/project/ccstdl/birch1/.cache/huggingface/accelerate/ddp.yaml",
+        // "--num_processes", "2",
+        "compute_metrics.py",
+        "--config-pred", "configs/dataset/pred/557M_cfg1.00.juelich.jsonc",
+        "--config-target", "configs/dataset/imagenet.juelich.jsonc",
+        "--evaluate-n", "50000",
+        "--batch-size", "768",
+        // "--start-method", "fork",
+        "--torchmetrics-fid",
+        "--mixed-precision", "fp16",
+        "--evaluate-with", "inception", "dinov2"
+      ],
+      "env": {
+        // "CUDA_VISIBLE_DEVICES": "0,1",
+        "K_DIFFUSION_USE_COMPILE": "0"
+      },
     },
     {
       "name": "Python: Ablation integration-test",
