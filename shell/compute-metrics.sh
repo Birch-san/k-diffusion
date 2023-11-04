@@ -106,7 +106,7 @@ CONFIG_TEMPLATE='{
 set -o xtrace
 
 CONFIG_JSON="$(jq -n \
---arg 'imageSize' "$image_size" \
+--argjson 'imageSize' "$image_size" \
 --arg 'wdsPattern' "$wds_in_dir/$TARS" \
 "$CONFIG_TEMPLATE")"
 
