@@ -99,6 +99,10 @@ export WANDB_START_METHOD="thread"
 ml Stages/2024 2> /dev/null
 ml Python/3.11.3
 ml CUDA/12
+# we use jq to write a JSON config in compute-metrics.sh.
+# if this is not available on your cluster, then you could modify compute-metrics.sh
+# to compose the JSON config via string templating instead.
+ml jq/1.6
 
 . "/p/project/ccstdl/birch1/venvs/$venv/bin/activate"
 

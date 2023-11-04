@@ -2,8 +2,7 @@
 set -eo pipefail
 
 # example invocation:
-# ./inference-multinode.sh --ckpt=checkpoint --config=config --wds_out_root=wds_out_root --cfg_scale=1.00
-# ./inference-multinode.sh --ckpt=/p/scratch/ccstdl/birch1/ckpt/imagenet_test_v2_007_02000000.safetensors --config=configs/config_557M.jsonc --wds_out_root=/p/scratch/ccstdl/birch1/model-out/kat_557M_2M --cfg_scale=1.00
+# ./inference-multinode.sh --log-dir=/p/scratch/ccstdl/birch1/batch-log/557M/step2M/cfg1.00 --config=configs/config_557M.jsonc --ckpt=/p/scratch/ccstdl/birch1/ckpt/imagenet_test_v2_007_02000000.safetensors --cfg-scale=1.00 --wds-out-dir=/p/scratch/ccstdl/birch1/model-out/557M/step2M/cfg1.00 --kdiff-dir=/p/project/ccstdl/birch1/git/k-diffusion --ddp-config=/p/home/jusers/birch1/juwels/.cache/huggingface/accelerate/ddp.yaml
 
 echo "slurm proc $SLURM_PROCID started $0"
 echo "received args: $@"
@@ -21,7 +20,7 @@ while getopts po:c:C:s:S:b:i:n:w:k:d:-: OPT; do
   fi
   case "$OPT" in
     p | prototyping )   prototyping=true ;;
-    o | log-root )      log_root="${OPTARG}" ;;
+    o | log-dir )       log_dir="${OPTARG}" ;;
     c | config )        config="${OPTARG}" ;;
     C | ckpt )          ckpt="${OPTARG}" ;;
     s | cfg-scale )     cfg_scale="${OPTARG}" ;;
@@ -29,7 +28,7 @@ while getopts po:c:C:s:S:b:i:n:w:k:d:-: OPT; do
     i | steps )         steps="${OPTARG}" ;;
     b | batch-per-gpu ) batch_per_gpu="${OPTARG}" ;;
     n | inference-n )   inference_n="${OPTARG}" ;;
-    w | wds-out-root )  wds_out_root="${OPTARG}" ;;
+    w | wds-out-dir )   wds_out_dir="${OPTARG}" ;;
     k | kdiff-dir )     kdiff_dir="${OPTARG}" ;;
     d | ddp-config )    ddp_config="${OPTARG}" ;;
     ??* )          die "Illegal option --$OPT" ;;            # bad long option
@@ -48,12 +47,12 @@ if [[ -z "$ckpt" ]]; then
   die "'ckpt' option was empty. example: /p/scratch/ccstdl/birch1/ckpt/imagenet_test_v2_007_02000000.safetensors"
 fi
 
-if [[ -z "$wds_out_root" ]]; then
-  die "'wds-out-root' option was empty. example: /p/scratch/ccstdl/birch1/model-out/kat_557M_2M"
+if [[ -z "$wds_out_dir" ]]; then
+  die "'wds-out-dir' option was empty. example: /p/scratch/ccstdl/birch1/model-out/557M/step2M/cfg1.00"
 fi
 
-if [[ -z "$log_root" ]]; then
-  die "'log-root' option was empty. example: /p/scratch/ccstdl/birch1/batch-log/kat_557M_2M"
+if [[ -z "$log_dir" ]]; then
+  die "'log-dir' option was empty. example: /p/scratch/ccstdl/birch1/batch-log/557M/step2M/cfg1.00"
 fi
 
 if [[ -z "$kdiff_dir" ]]; then
@@ -78,15 +77,12 @@ if [[ "$prototyping" == "true" ]]; then
   export K_DIFFUSION_USE_COMPILE=0
 fi
 
-WDS_OUT_DIR="$wds_out_root/cfg$CFG_SCALE"
+mkdir -p "$wds_out_dir" "$log_dir"
 
-LOG_DIR="$log_root/cfg$CFG_SCALE"
-mkdir -p "$WDS_OUT_DIR" "$LOG_DIR"
+OUT_TXT="$log_dir/inference.out.$SLURM_PROCID.txt"
+ERR_TXT="$log_dir/inference.err.$SLURM_PROCID.txt"
 
-OUT_TXT="$LOG_DIR/out.$SLURM_PROCID.txt"
-ERR_TXT="$LOG_DIR/err.$SLURM_PROCID.txt"
-
-echo "LOG_DIR (derived from log_root and CFG_SCALE): $LOG_DIR"
+echo "log_dir: $log_dir"
 echo "writing output to: $OUT_TXT"
 echo "writing errors to: $ERR_TXT"
 
@@ -95,7 +91,7 @@ CUMULATIVE_BATCH="$(( "$BATCH_PER_GPU" * "$NUM_PROCESSES" ))"
 
 echo "ckpt: $ckpt"
 echo "config: $config"
-echo "wds_out_root: $wds_out_root"
+echo "wds_out_dir: $wds_out_dir"
 echo "CFG_SCALE: $CFG_SCALE"
 echo "SAMPLER: $SAMPLER"
 echo "STEPS: $STEPS"
@@ -106,13 +102,11 @@ echo "SLURM_JOB_NUM_NODES: $SLURM_JOB_NUM_NODES"
 echo "GPUS_PER_NODE: $GPUS_PER_NODE"
 echo "NUM_PROCESSES: $NUM_PROCESSES"
 
-echo "WDS_OUT_DIR (derived from wds_out_root and CFG_SCALE): $WDS_OUT_DIR"
-
 set -o xtrace
 cd "$kdiff_dir"
 
 exec python -m accelerate.commands.launch \
---num_processes="$NUM_PROCESSES" \
+--num_processes "$NUM_PROCESSES" \
 --num_machines "$SLURM_JOB_NUM_NODES" \
 --machine_rank "$SLURM_PROCID" \
 --main_process_ip "$SLURM_LAUNCH_NODE_IPADDR" \
@@ -128,5 +122,5 @@ train.py \
 --inference-only \
 --sample-n "$CUMULATIVE_BATCH" \
 --inference-n "$SAMPLES_TOTAL" \
---inference-out-wds-root "$WDS_OUT_DIR" \
+--inference-out-wds-root "$wds_out_dir" \
 >"$OUT_TXT" 2>"$ERR_TXT"
