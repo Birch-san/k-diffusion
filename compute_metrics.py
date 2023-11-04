@@ -1,14 +1,20 @@
 import accelerate
 import argparse
 import k_diffusion as K
+from k_diffusion.evaluation import InceptionV3FeatureExtractor, CLIPFeatureExtractor, DINOv2FeatureExtractor
 from pathlib import Path
 import torch
-from torch import distributed as dist, multiprocessing as mp, Tensor, FloatTensor
+from torch import distributed as dist, multiprocessing as mp, Tensor, FloatTensor, cat
 from torch.utils import data
 from torchvision import transforms
-from typing import Dict, Optional, Literal, Callable
+from typing import Dict, Optional, Literal, Callable, List, Iterator, Union
+from tqdm import tqdm
+from itertools import islice
 import math
 from kdiff_trainer.dataset.get_dataset import get_dataset
+
+ExtractorName = Literal['inception', 'clip', 'dinov2']
+ExtractorType = Callable[[FloatTensor], FloatTensor]
 
 def ensure_distributed():
     if not dist.is_initialized():
@@ -27,7 +33,7 @@ def main():
                    help='whether to use torchmetrics FID (in addition to CleanFID)')
     p.add_argument('--evaluate-n', type=int, default=2000,
                    help='the number of samples to draw to evaluate')
-    p.add_argument('--evaluate-with', type=str, default='inception',
+    p.add_argument('--evaluate-with', type=str, nargs='+', default=['inception'],
                    choices=['inception', 'clip', 'dinov2'],
                    help='the feature extractor to use for evaluation')
     p.add_argument('--clip-model', type=str, default='ViT-B/16',
@@ -46,6 +52,10 @@ def main():
     p.add_argument('--start-method', type=str, default='spawn',
                    choices=['fork', 'forkserver', 'spawn'],
                    help='the multiprocessing start method')
+    p.add_argument('--result-description', type=str, default='',
+                   help='preample to include on any result that is written to a file ()')
+    p.add_argument('--result-out-file', type=str, default=None,
+                   help='file into which to output result')
     args = p.parse_args()
 
     mp.set_start_method(args.start_method)
@@ -98,48 +108,112 @@ def main():
     pred_train_dl, target_train_dl = (data.DataLoader(train_set, args.batch_size, shuffle=not isinstance(train_set, data.IterableDataset), drop_last=False, num_workers=args.num_workers, persistent_workers=True, pin_memory=True) for train_set in (pred_train_set, target_train_set))
     pred_train_dl, target_train_dl = accelerator.prepare(pred_train_dl, target_train_dl)
 
-    match args.evaluate_with:
-        case 'inception':
-            extractor = K.evaluation.InceptionV3FeatureExtractor(device=device)
-        case 'clip':
-            extractor = K.evaluation.CLIPFeatureExtractor(args.clip_model, device=device)
-        case 'dinov2':
-            extractor = K.evaluation.DINOv2FeatureExtractor(args.dinov2_model, device=device)
-        case _:
-            raise ValueError(f"Invalid evaluation feature extractor '{args.evaluate_with}'")
+    def get_extractor(e: str) -> Union[InceptionV3FeatureExtractor, CLIPFeatureExtractor, DINOv2FeatureExtractor]:
+        if e == 'inception':
+            return InceptionV3FeatureExtractor(device=device)
+        if e == 'clip':
+            return CLIPFeatureExtractor(args.clip_model, device=device)
+        if e == 'dinov2':
+            return DINOv2FeatureExtractor(args.dinov2_model, device=device)
+        raise ValueError(f"Invalid evaluation feature extractor '{e}'")
+    extractors: Dict[ExtractorName, ExtractorType] = {e: accelerator.prepare(get_extractor(e)) for e in args.evaluate_with}
     
-    pred_train_iter, target_train_iter = (iter(dl) for dl in (pred_train_dl, target_train_dl))
+    pred_train_iter: Iterator[List[FloatTensor]] = iter(pred_train_dl)
+    target_train_iter: Iterator[List[FloatTensor]] = iter(target_train_dl)
     if args.torchmetrics_fid:
+        from torchmetrics.image.fid import FrechetInceptionDistance, NoTrainInceptionV3
+        # "normalize" means "my images are [0, 1] floats"
+        normalize=True
+        # https://torchmetrics.readthedocs.io/en/stable/image/frechet_inception_distance.html
+        fid_obj = FrechetInceptionDistance(feature=2048, normalize=normalize)
+        fid_obj: FrechetInceptionDistance = accelerator.prepare(fid_obj)
+        inception: NoTrainInceptionV3 = fid_obj.inception
+        # first part of FrechetInceptionDistance#update
+        def compute_features(imgs: FloatTensor) -> FloatTensor:
+            imgs = (imgs * 255).byte() if normalize else imgs
+            features: FloatTensor = inception(imgs)
+            return accelerator.gather(features)
+
         if accelerator.is_main_process:
-            from torchmetrics.image.fid import FrechetInceptionDistance
-            # "normalize" means "my images are [0, 1] floats"
-            # https://torchmetrics.readthedocs.io/en/stable/image/frechet_inception_distance.html
-            fid_obj = FrechetInceptionDistance(feature=2048, normalize=True)
-            fid_obj.to(accelerator.device)
-        def observe_samples(samples: FloatTensor) -> None:
-            all_samples: FloatTensor = accelerator.gather(samples)
-            if accelerator.is_main_process:
-                fid_obj.update(all_samples, real=source_name == 'target')
+            # this is just FrechetInceptionDistance#update, except with support for gather.
+            # only main process accumulates.
+            def update_torchmetrics_fid(imgs: FloatTensor, real: bool) -> None:
+                features: FloatTensor = compute_features(imgs)
+                fid_obj.orig_dtype = features.dtype
+                features = features.double()
+                if features.dim() == 1:
+                    features = features.unsqueeze(0)
+                sum = features.sum(dim=0)
+                cov_sum = features.t().mm(features)
+                num_samples: int = features.shape[0]
+                if real:
+                    fid_obj.real_features_sum += sum
+                    fid_obj.real_features_cov_sum += cov_sum
+                    fid_obj.real_features_num_samples += num_samples
+                else:
+                    fid_obj.fake_features_sum += sum
+                    fid_obj.fake_features_cov_sum += cov_sum
+                    fid_obj.fake_features_num_samples += num_samples
+        else:
+            del fid_obj
+            def update_torchmetrics_fid(imgs: FloatTensor, _) -> None:
+                # participate in gather
+                compute_features(imgs)
     else:
-        observe_samples: Optional[Callable[[FloatTensor], None]] = None
-    features: Dict[Literal['pred', 'target'], Optional[Tensor]] = { 'pred': None, 'target': None }
-    for source_name, iter_ in zip(('pred', 'target'), (pred_train_iter, target_train_iter)):
-        print(f'Computing features for {source_name}...')
-        # to anybody who wants to shorten this to a lambda: have you tried putting a breakpoint in a lambda?
-        def sample_fn(_) -> Tensor:
-            samp = next(iter_)
-            return samp[0]
-        features[source_name] = K.evaluation.compute_features(accelerator, sample_fn, extractor, args.evaluate_n, args.batch_size, observe_samples=observe_samples)
+        def update_torchmetrics_fid(*_) -> None: pass
+    samples_per_batch_all_proc: int = args.batch_size * accelerator.num_processes
+    batches_per_proc: int = math.ceil(args.evaluate_n / samples_per_batch_all_proc)
     if accelerator.is_main_process:
+        features: Dict[ExtractorName, Dict[Literal['pred', 'target'], List[FloatTensor]]] = {
+            extractor: { 'pred': [], 'target': [] } for extractor in extractors.keys()
+        }
+    for subject, iter_ in zip(('pred', 'target'), (pred_train_iter, target_train_iter)):
+        for batch_ix, batch in enumerate(tqdm(
+            islice(iter_, batches_per_proc),
+            f'Computing features for {subject}...',
+            disable=not accelerator.is_main_process,
+            position=0,
+            total=batches_per_proc,
+            unit='batch',
+        )):
+            samples, *_ = batch
+            curr_total: int = batch_ix * samples_per_batch_all_proc
+            samples_remaining: int = args.evaluate_n-curr_total
+            # (optimization): use a smaller per-proc batch when possible for the final batch
+            curr_batch_per_proc: int = min(args.batch_size, math.ceil(samples_remaining / accelerator.num_processes))
+            samples = samples[:curr_batch_per_proc]
+            for extractor_name, extractor in extractors.items():
+                extracted: FloatTensor = extractor(samples)
+                extracted = accelerator.gather(extracted)
+                if accelerator.is_main_process:
+                    extracted = extracted[:min(samples_per_batch_all_proc, samples_remaining)]
+                    features[extractor_name][subject].append(extracted)
+                del extracted
+            update_torchmetrics_fid(samples, subject == 'target')
+    if accelerator.is_main_process:
+        # using new variable name rather than reassigning, to get type inference to use the new type
+        features_: Dict[ExtractorName, Dict[Literal['pred', 'target'], FloatTensor]] = {
+            extractor_name: {
+                subject: cat(features_list) for subject, features_list in features_by_subject.items()
+            } for extractor_name, features_by_subject in features.items()
+        }
+        del features
         if args.torchmetrics_fid:
-            fid = fid_obj.compute()
-            print(f'torchmetrics FID: {fid.item():g}')
-        fid = K.evaluation.fid(features['pred'], features['target'])
-        kid = K.evaluation.kid(features['pred'], features['target'])
-        print(f'CleanFID FID: {fid.item():g}, KID: {kid.item():g}')
-        print(f"Finished evaluating {features['pred'].shape[0]} samples.")
-        assert features['pred'].shape[0] == args.evaluate_n, f"you requested --evaluate-n={args.evaluate_n}, but we found {features['pred'].shape[0]} samples. probably the trange() inside K.evaluation.compute_features skipped the final batch due to rounding problems. try ensuring that evaluate_n is divisible by batch_size*procs without a remainder."
-        assert features['pred'].shape[0] == features['target'].shape[0], f"somehow we have a mismatch between number of ground-truth samples ({features['target'].shape[0]}) and model-predicted samples ({features['pred'].shape[0]})."
+            fid: FloatTensor = fid_obj.compute()
+            print(f'torchmetrics, {fid_obj.fake_features_num_samples} samples:')
+            print(f'  FID: {fid.item()}')
+            assert fid_obj.fake_features_num_samples == args.evaluate_n, f"[torchmetrics FID] you requested --evaluate-n={args.evaluate_n}, but we found {fid_obj.fake_features_num_samples} samples. perhaps the final batch was skipped due to rounding problems. try ensuring that evaluate_n is divisible by batch_size*procs without a remainder, or try simplifying the multi-processing (i.e. single-node or single-GPU)."
+            assert fid_obj.fake_features_num_samples == fid_obj.real_features_num_samples, f"[torchmetrics FID] somehow we have a mismatch between number of ground-truth samples ({fid_obj.real_features_num_samples}) and model-predicted samples ({fid_obj.fake_features_num_samples})."
+        for extractor_name, features_by_subject in features_.items():
+            pred, target = features_by_subject['pred'], features_by_subject['target']
+            initial: Literal['I', 'C', 'D'] = extractor_name[0].upper()
+            fid: FloatTensor = K.evaluation.fid(pred, target)
+            kid: FloatTensor = K.evaluation.kid(pred, target)
+            print(f'{extractor_name}, {pred.shape[0]} samples:')
+            print(f'  F{initial}D: {fid.item():g}')
+            print(f'  K{initial}D: {kid.item():g}')
+            assert pred.shape[0] == args.evaluate_n, f"you requested --evaluate-n={args.evaluate_n}, but we found {pred.shape[0]} samples. perhaps the final batch was skipped due to rounding problems. try ensuring that evaluate_n is divisible by batch_size*procs without a remainder, or try simplifying the multi-processing (i.e. single-node or single-GPU)."
+            assert pred.shape[0] == target.shape[0], f"somehow we have a mismatch between number of ground-truth samples ({target.shape[0]}) and model-predicted samples ({pred.shape[0]})."
     del iter_
 
 if __name__ == '__main__':
