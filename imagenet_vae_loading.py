@@ -230,6 +230,9 @@ def main():
     print(f"r{accelerator.process_index} done")
     if accelerator.is_main_process:
         print(f'Output {samples_output} samples. We wanted {dataset_len_estimate}.')
+        print('per-channel val:', w_val.mean)
+        print('per-channel  sq:', w_sq.mean)
+        print('per-channel std:', torch.sqrt(w_sq.mean - w_val.mean**2))
         print(f'Saving averages to {avg_out_dir}')
         torch.save(w_val.mean, f'{avg_out_dir}/val.pt')
         torch.save(w_sq.mean,  f'{avg_out_dir}/sq.pt')
