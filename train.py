@@ -50,6 +50,7 @@ from kdiff_trainer.tqdm_ctx import tqdm_environ, TqdmOverrides
 from kdiff_trainer.iteration.batched import batched
 from kdiff_trainer.dataset_meta.get_class_captions import get_class_captions, ClassCaptions
 from kdiff_trainer.dataset.get_dataset import get_dataset
+from kdiff_trainer.dataset.get_latent_dataset import get_latent_dataset
 
 SinkOutput = TypedDict('SinkOutput', {
     '__key__': str,
@@ -341,13 +342,21 @@ def main():
         K.augmentation.KarrasAugmentationPipeline(model_config['augment_prob'], disable_all=model_config['augment_prob'] == 0),
     ])
 
-    train_set: Union[Dataset, IterableDataset] = get_dataset(
-        dataset_config,
-        config_dir=Path(args.config).parent,
-        uses_crossattn=uses_crossattn,
-        tf=tf,
-        class_captions=class_captions,
-    )
+    is_latent: bool = dataset_config.get('latents', False)
+    if is_latent:
+        train_set: Union[Dataset, IterableDataset] = get_latent_dataset(dataset_config)
+        channel_means: FloatTensor = torch.tensor(dataset_config['channel_means'], device=accelerator.device, dtype=torch.float32).unsqueeze(-1).unsqueeze(-1).unsqueeze(0)
+        channel_squares: FloatTensor = torch.tensor(dataset_config['channel_squares'], device=accelerator.device, dtype=torch.float32).unsqueeze(-1).unsqueeze(-1).unsqueeze(0)
+        channel_stds: FloatTensor = torch.sqrt(channel_squares - channel_means**2)
+        channel_scales: FloatTensor = 1/channel_stds
+    else:
+        train_set: Union[Dataset, IterableDataset] = get_dataset(
+            dataset_config,
+            config_dir=Path(args.config).parent,
+            uses_crossattn=uses_crossattn,
+            tf=tf,
+            class_captions=class_captions,
+        )
 
     if accelerator.is_main_process:
         try:
@@ -813,7 +822,17 @@ def main():
                     start_timer = time.time()
 
                 with accelerator.accumulate(model):
-                    reals, _, aug_cond = batch[image_key]
+                    if is_latent:
+                        # we are using a dataset of precomputed latents, which means any augmenting would've had to have been done before it was encoded
+                        reals = batch[image_key]
+                        aug_cond = None
+                        # scale-and-shift from VAE per-channel average distribution, to standard Gaussian
+                        # shift commented-out for now, because they seemed to already be pretty close to 0-mean, and applying the shift seemed to worsen it
+                        # reals.sub_(channel_means.to(reals.dtype))
+                        reals.mul_(channel_scales.to(reals.dtype))
+                        reals = reals.detach()
+                    else:
+                        reals, _, aug_cond = batch[image_key]
                     class_cond, extra_args = None, {}
                     if uses_crossattn:
                         assert precomputed_conds is not None, "cross-attention is currently only implemented for precomputed conditions"

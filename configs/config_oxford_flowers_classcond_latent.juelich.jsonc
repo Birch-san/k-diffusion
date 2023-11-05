@@ -21,7 +21,8 @@
     "augment_prob": 0.0,
     "sigma_data": 0.5,
     "sigma_min": 1e-2,
-    "sigma_max": 160,
+    // reduce sigma_max (160 -> 80) since canvas size is smaller than the 128px that this config came from
+    "sigma_max": 80,
     "sigma_sample_density": {
       "type": "cosine-interpolated"
     }
@@ -29,19 +30,20 @@
   "dataset": {
     "type": "wds-class",
     "latents": true,
+    // https://huggingface.co/datasets/CitationMax/oxford-flowers-latent-512/resolve/main/00000.tar
     "location": "/p/scratch/ccstdl/birch1/dataset-out/oxford-flowers-latents-512/wds/00000.tar",
     "wds_latent_key": "latent.pth",
     "class_cond_key": "cls.txt",
     "classes_to_captions": "oxford-flowers",
     "num_classes": 102,
     "estimated_samples": 7169,
-    "channel_means": [-4.3245, -0.2387,  1.6597,  0.5779],
-    "channel_squares": [80.7550, 48.5894, 62.1183, 28.0308]
+    "channel_means": [-4.304563999176025, -0.2269466072320938, 1.6671230792999268, 0.579799473285675],
+    "channel_squares": [80.77391815185547, 48.63021469116211, 62.30317687988281, 28.040388107299805]
     // std is:
     // torch.sqrt(squares - means**2)
-    // [7.8895, 6.9698, 7.7152, 5.2635]
+    // [7.889527320861816, 6.969842910766602, 7.715171813964844, 5.263479709625244]
     // its reciprocal is actually close to SDXL VAE's scaling_factor of 0.13025
-    // [0.1267507446606249, 0.14347613991793165, 0.1296142679386147, 0.18998765080269783]
+    // [0.12675030529499054, 0.1434752494096756, 0.12961474061012268, 0.1899883896112442]
   },
   "optimizer": {
     "type": "adamw",
