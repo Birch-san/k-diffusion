@@ -349,6 +349,21 @@ def main():
         channel_squares: FloatTensor = torch.tensor(dataset_config['channel_squares'], device=accelerator.device, dtype=torch.float32).unsqueeze(-1).unsqueeze(-1).unsqueeze(0)
         channel_stds: FloatTensor = torch.sqrt(channel_squares - channel_means**2)
         channel_scales: FloatTensor = 1/channel_stds
+
+        # we're just using this to decode demo latents
+        from diffusers import AutoencoderKL
+        from diffusers.models.autoencoder_kl import DecoderOutput
+        vae: AutoencoderKL = AutoencoderKL.from_pretrained(
+            'stabilityai/stable-diffusion-xl-base-0.9',
+            use_safetensors=True,
+            subfolder='vae',
+            torch_dtype=torch.bfloat16,
+        )
+        # 8x upsample
+        maybe_vae_upsample: int = 1 << (len(vae.config.block_out_channels) - 1)
+        del vae.encoder
+        vae.eval()
+        accelerator.prepare(vae)
     else:
         train_set: Union[Dataset, IterableDataset] = get_dataset(
             dataset_config,
@@ -357,6 +372,7 @@ def main():
             tf=tf,
             class_captions=class_captions,
         )
+        maybe_vae_upsample = 1
 
     if accelerator.is_main_process:
         try:
@@ -627,6 +643,17 @@ def main():
             pass
 
         batch: Samples = generate_batch_of_samples()
+        if is_latent:
+            latents = batch.x_0
+            # these are pretty big shifts, and they seem to begin pretty close to mean-centered anyway, so let's disregard
+            # latents = latents + channel_means.to(latents.dtype)
+            # scale-and-shift from standard Gaussian to VAE per-channel average distribution
+            latents = latents / channel_scales.to(latents.dtype)
+            del batch.x_0
+            # VAE decoder outputs a FloatTensor with range approx ±1
+            decoded: DecoderOutput = vae.decode(latents.to(vae.dtype))
+            batch.x_0 = decoded.sample
+            del decoded, latents
         if accelerator.is_main_process:
             if class_captions is not None:
                 assert isinstance(batch, ClassConditionalSamples)
@@ -739,7 +766,7 @@ def main():
 
     # TODO: are h and w the right way around?
     samp_h, samp_w = model_config['input_size']
-    sample_size = Dimensions(height=samp_h, width=samp_w)
+    sample_size = Dimensions(height=samp_h * maybe_vae_upsample, width=samp_w * maybe_vae_upsample)
     captioner: GridCaptioner = make_default_grid_captioner(
         font_path=args.font,
         sample_n=args.sample_n,
@@ -827,9 +854,9 @@ def main():
                         reals = batch[image_key]
                         aug_cond = None
                         # scale-and-shift from VAE per-channel average distribution, to standard Gaussian
-                        # shift commented-out for now, because they seemed to already be pretty close to 0-mean, and applying the shift seemed to worsen it
-                        # reals.sub_(channel_means.to(reals.dtype))
                         reals.mul_(channel_scales.to(reals.dtype))
+                        # these are pretty big shifts, and they seem to begin pretty close to mean-centered anyway, so let's disregard
+                        # reals.sub_(channel_means.to(reals.dtype))
                         reals = reals.detach()
                     else:
                         reals, _, aug_cond = batch[image_key]
