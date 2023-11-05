@@ -11,4 +11,5 @@ wandb/*
 *.safetensors
 /out/
 /out-srun/
+/out-eval/
 /log/
