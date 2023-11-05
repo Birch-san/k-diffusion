@@ -215,9 +215,11 @@ def main():
                     break
                 # it's crucial to transfer the _sample_ to CPU, not the batch. otherwise each sample we serialize, has the whole batch's data hanging off it
                 sink_sample(sink, sample_ix_in_corpus, latent.cpu(), cls.item())
+                samples_output += 1
             del all_latents, latents, all_classes, classes
     print(f"r{accelerator.process_index} done")
     if accelerator.is_main_process:
+        print(f'Output {samples_output} samples. We wanted {dataset_len_estimate}.')
         print(f'Saving averages to {avg_out_dir}')
         torch.save(w_val.mean, f'{avg_out_dir}/val.pt')
         torch.save(w_sq.mean,  f'{avg_out_dir}/sq.pt')
