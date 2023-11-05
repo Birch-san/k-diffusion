@@ -171,6 +171,7 @@ def main():
         w_val: Optional[Welford] = None
         w_sq: Optional[Welford] = None
 
+    samples_output = 0
     it: Iterator[List[Tensor]] = iter(train_dl)
     with sink_ctx as sink:
         for batch_ix, batch in enumerate(tqdm(it, total=batches_estimate)):
@@ -211,7 +212,7 @@ def main():
             all_classes: FloatTensor = accelerator.gather(classes)
             for sample_ix_in_batch, (latent, cls) in enumerate(zip(all_latents.unbind(), all_classes.unbind())):
                 sample_ix_in_corpus: int = batch_ix * args.batch_size * accelerator.num_processes + sample_ix_in_batch
-                if sample_ix_in_corpus > dataset_len_estimate:
+                if sample_ix_in_corpus >= dataset_len_estimate:
                     break
                 # it's crucial to transfer the _sample_ to CPU, not the batch. otherwise each sample we serialize, has the whole batch's data hanging off it
                 sink_sample(sink, sample_ix_in_corpus, latent.cpu(), cls.item())
