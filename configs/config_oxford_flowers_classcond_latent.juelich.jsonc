@@ -1,0 +1,62 @@
+{
+  "model": {
+    "type": "image_transformer_v2",
+    "input_channels": 4,
+    "input_size": [64, 64],
+    // deliberately reduced patch size (from 4 -> 2) compared to RGB
+    "patch_size": [2, 2],
+    "depths": [2, 2, 4],
+    // for latent: we might need to increase base width compared to RGB's 128
+    // or maybe not? because we reduced the patch size
+    "widths": [128, 256, 512],
+    "self_attns": [
+      {"type": "neighborhood", "d_head": 64, "kernel_size": 7},
+      {"type": "neighborhood", "d_head": 64, "kernel_size": 7},
+      {"type": "global", "d_head": 64}
+    ],
+    "loss_config": "karras",
+    "loss_weighting": "soft-min-snr",
+    "dropout_rate": [0.0, 0.0, 0.1],
+    "mapping_dropout_rate": 0.0,
+    "augment_prob": 0.0,
+    "sigma_data": 0.5,
+    "sigma_min": 1e-2,
+    "sigma_max": 160,
+    "sigma_sample_density": {
+      "type": "cosine-interpolated"
+    }
+  },
+  "dataset": {
+    "type": "wds-class",
+    "latents": true,
+    "location": "/p/scratch/ccstdl/birch1/dataset-out/oxford-flowers-latents-512/wds/00000.tar",
+    "wds_latent_key": "latent.pth",
+    "class_cond_key": "cls.txt",
+    "classes_to_captions": "oxford-flowers",
+    "num_classes": 102,
+    "estimated_samples": 7169,
+    "channel_means": [-4.3245, -0.2387,  1.6597,  0.5779],
+    "channel_squares": [80.7550, 48.5894, 62.1183, 28.0308]
+    // std is:
+    // torch.sqrt(squares - means**2)
+    // [7.8895, 6.9698, 7.7152, 5.2635]
+    // its reciprocal is actually close to SDXL VAE's scaling_factor of 0.13025
+    // [0.1267507446606249, 0.14347613991793165, 0.1296142679386147, 0.18998765080269783]
+  },
+  "optimizer": {
+    "type": "adamw",
+    "lr": 5e-4,
+    "betas": [0.9, 0.95],
+    "eps": 1e-8,
+    "weight_decay": 1e-3
+  },
+  "lr_sched": {
+    "type": "constant",
+    "warmup": 0.0
+  },
+  "ema_sched": {
+    "type": "inverse",
+    "power": 0.75,
+    "max_value": 0.9999
+  }
+}

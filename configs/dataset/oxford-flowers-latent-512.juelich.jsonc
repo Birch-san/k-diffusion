@@ -1,0 +1,20 @@
+{
+  "model": { "type": "none" },
+  "dataset": {
+    "type": "wds-class",
+    "latents": true,
+    "location": "/p/scratch/ccstdl/birch1/dataset-out/oxford-flowers-latents-512/wds/00000.tar",
+    "wds_latent_key": "latent.pth",
+    "class_cond_key": "cls.txt",
+    "classes_to_captions": "oxford-flowers",
+    "num_classes": 102,
+    "estimated_samples": 7169,
+    "channel_means": [-4.3245, -0.2387,  1.6597,  0.5779],
+    "channel_squares": [80.7550, 48.5894, 62.1183, 28.0308]
+    // std is:
+    // torch.sqrt(squares - means**2)
+    // [7.8895, 6.9698, 7.7152, 5.2635]
+    // its reciprocal is actually close to SDXL VAE's scaling_factor of 0.13025
+    // [0.1267507446606249, 0.14347613991793165, 0.1296142679386147, 0.18998765080269783]
+  },
+}
