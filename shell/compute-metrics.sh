@@ -2,7 +2,7 @@
 set -eo pipefail
 
 # example invocation:
-# ./compute-metrics.sh --wds-in-dir=/p/scratch/ccstdl/birch1/model-out/557M/step2M/cfg1.00 --config-target=configs/dataset/imagenet.juelich.jsonc --log-dir=/p/scratch/ccstdl/birch1/batch-log/557M/step2M/cfg1.00 --dataset-config-out-path=configs/dataset/pred/557M/step2M/cfg1.00.jsonc --image-size=256 --kdiff-dir=/p/project/ccstdl/birch1/git/k-diffusion --ddp-config=/p/home/jusers/birch1/juwels/.cache/huggingface/accelerate/ddp.yaml
+# ./compute-metrics.sh --wds-in-dir=/p/scratch/ccstdl/birch1/model-out/557M/step2M/cfg1.00 --config-target=configs/dataset/imagenet.juelich.jsonc --log-dir=/p/scratch/ccstdl/birch1/batch-log/557M/step2M/cfg1.00 --dataset-config-out-path=configs/dataset/pred/557M/step2M/cfg1.00.jsonc --image-size=256 --kdiff-dir=/p/project/ccstdl/birch1/git/k-diffusion --ddp-config=/p/home/jusers/birch1/juwels/.cache/huggingface/accelerate/ddp.yaml -- --torchmetrics-fid --evaluate-with inception dinov2
 
 echo "slurm proc $SLURM_PROCID started $0"
 echo "received args: $@"
@@ -12,29 +12,42 @@ die() { echo "$*" >&2; exit 2; }  # complain to STDERR and exit with error
 needs_arg() { if [ -z "$OPTARG" ]; then die "No arg for --$OPT option"; fi; }
 
 # https://stackoverflow.com/a/28466267/5257399
-while getopts mi:t:o:d:n:b:w:s:k:d:-: OPT; do
+while getopts i:t:o:d:n:b:s:k:d:r:-: OPT; do
   if [ "$OPT" = "-" ]; then   # long option: reformulate OPT and OPTARG
     OPT="${OPTARG%%=*}"       # extract long option name
     OPTARG="${OPTARG#$OPT}"   # extract long option argument (may be empty)
     OPTARG="${OPTARG#=}"      # if long option argument, remove assigning `=`
   fi
   case "$OPT" in
-    m | torchmetrics-fid ) torchmetrics_fid=true ;;
     i | wds-in-dir )    wds_in_dir="${OPTARG}" ;;
     t | config-target ) config_target="${OPTARG}" ;; # relative to k-diffusion dir
     o | log-dir )       log_dir="${OPTARG}" ;;
     d | dataset-config-out-path ) dataset_config_out_path="${OPTARG}" ;; # relative to k-diffusion dir
     n | evaluate-n )    evaluate_n="${OPTARG}" ;;
     b | batch-per-gpu ) batch_per_gpu="${OPTARG}" ;;
-    w | evaluate-with ) evaluate_with="${OPTARG}" ;;
     s | image-size )    image_size="${OPTARG}" ;;
     k | kdiff-dir )     kdiff_dir="${OPTARG}" ;;
     d | ddp-config )    ddp_config="${OPTARG}" ;;
+    # we are forced to use a file here instead of a string, because this getopts parsing doesn't seem to handle multi-line string args
+    r | result-description-file )    result_description_file="${OPTARG}" ;;
     ??* )          die "Illegal option --$OPT" ;;            # bad long option
     ? )            exit 2 ;;  # bad short option (error reported via getopts)
   esac
 done
 shift $((OPTIND-1)) # remove parsed options and args from $@ list
+
+if [[ -n "$result_description_file" ]]; then
+  if [[ -f "$result_description_file" ]]; then
+    RESULT_DESCRIPTION="$(cat "$result_description_file")"
+  else
+    die "'result-description-file' option ("$result_description_file") was not a valid file."
+  fi
+else
+  RESULT_DESCRIPTION=''
+fi
+echo "result description: $RESULT_DESCRIPTION"
+
+echo "varargs: $@"
 
 echo "options parsed successfully. checking required args."
 
@@ -69,7 +82,7 @@ fi
 echo "all required args found."
 
 : "${evaluate_n:=50000}"
-: "${batch_per_gpu:=128}"
+: "${batch_per_gpu:=1000}"
 : "${evaluate_with:=dinov2}"
 
 set +e
@@ -116,11 +129,6 @@ mkdir -p "$(dirname "$dataset_config_out_path")" "$log_dir"
 
 echo "$CONFIG_JSON" > "$dataset_config_out_path"
 
-VARARGS=()
-if [[ "$torchmetrics_fid" == "true" ]]; then
-  VARARGS=(${VARARGS[@]} --torchmetrics-fid)
-fi
-
 : "${SLURM_PROCID:=0}"
 : "${GPUS_PER_NODE:=4}"
 : "${SLURM_JOB_NUM_NODES:=1}"
@@ -142,16 +150,18 @@ if [[ -n "$MAIN_PROCESS_PORT" ]]; then
   )
 fi
 
-K_DIFFUSION_USE_COMPILE=0 exec python -m accelerate.commands.launch \
---num_processes "$NUM_PROCESSES" \
---num_machines "$SLURM_JOB_NUM_NODES" \
-"${ACC_VARARGS[@]}" \
---config_file "$ddp_config" \
+# we avoid using accelerate because multi-GPU inference seems to exhaust the dataloader prematurely (only 20k of 50k samples found)
+# K_DIFFUSION_USE_COMPILE=0 exec python -m accelerate.commands.launch \
+# --num_processes "$NUM_PROCESSES" \
+# --num_machines "$SLURM_JOB_NUM_NODES" \
+# "${ACC_VARARGS[@]}" \
+# --config_file "$ddp_config" \
+K_DIFFUSION_USE_COMPILE=0 exec python \
 compute_metrics.py \
 --config-pred "$dataset_config_out_path" \
 --config-target "$config_target" \
 --batch-size "$batch_per_gpu" \
 --evaluate-n "$evaluate_n" \
---evaluate-with "$evaluate_with" \
-"${VARARGS[@]}" \
+--result-description "$RESULT_DESCRIPTION" \
+"$@" \
 >"$OUT_TXT" 2>"$ERR_TXT"
