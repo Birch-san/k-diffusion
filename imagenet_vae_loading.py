@@ -156,8 +156,8 @@ def main():
         makedirs(wds_out_dir, exist_ok=True)
         makedirs(avg_out_dir, exist_ok=True)
         sink_ctx = ShardWriter(f'{wds_out_dir}/%05d.tar', maxcount=10000)
-        w_mean = Welford(device=accelerator.device)
-        w_std = Welford(device=accelerator.device)
+        w_val = Welford(device=accelerator.device)
+        w_sq = Welford(device=accelerator.device)
         def sink_sample(sink: ShardWriter, ix: int, latent: FloatTensor, cls: int) -> None:
             out: SinkOutput = {
                 '__key__': str(ix),
@@ -168,8 +168,8 @@ def main():
     else:
         sink_ctx = nullcontext()
         sink_sample: Callable[[Optional[ShardWriter], int, FloatTensor, int], None] = lambda *_: ...
-        w_mean: Optional[Welford] = None
-        w_std: Optional[Welford] = None
+        w_val: Optional[Welford] = None
+        w_sq: Optional[Welford] = None
 
     it: Iterator[List[Tensor]] = iter(train_dl)
     with sink_ctx as sink:
@@ -193,19 +193,20 @@ def main():
             #   all_latents.mul_(vae.config.scaling_factor)
 
             if accelerator.is_main_process:
-                per_channel_means: FloatTensor = all_latents.mean((-1, -2))
-                per_channel_stds: FloatTensor = all_latents.std((-1, -2))
-                w_mean.add_all(per_channel_means)
-                w_std.add_all(per_channel_stds)
+                per_channel_val_mean: FloatTensor = all_latents.mean((-1, -2))
+                per_channel_sq_mean: FloatTensor = all_latents.square().mean((-1, -2))
+                w_val.add_all(per_channel_val_mean)
+                w_sq.add_all(per_channel_sq_mean)
 
                 if batch_ix % args.log_average_every_n == 0:
-                    print('per-channel mean:', w_mean.mean)
-                    print('per-channel  std:', w_std.mean)
+                    print('per-channel val:', w_val.mean)
+                    print('per-channel  sq:', w_sq.mean)
+                    print('per-channel std:', torch.sqrt(w_sq.mean - w_val.mean**2))
                 if batch_ix % args.save_average_every_n == 0:
                     print(f'Saving averages to {avg_out_dir}')
-                    torch.save(w_mean.mean, f'{avg_out_dir}/mean.pt')
-                    torch.save(w_std.mean,  f'{avg_out_dir}/std.pt')
-                del per_channel_means, per_channel_stds
+                    torch.save(w_val.mean, f'{avg_out_dir}/val.pt')
+                    torch.save(w_sq.mean,  f'{avg_out_dir}/sq.pt')
+                del per_channel_val_mean, per_channel_sq_mean
 
             all_classes: FloatTensor = accelerator.gather(classes)
             for sample_ix_in_batch, (latent, cls) in enumerate(zip(all_latents.unbind(), all_classes.unbind())):
@@ -218,8 +219,8 @@ def main():
     print(f"r{accelerator.process_index} done")
     if accelerator.is_main_process:
         print(f'Saving averages to {avg_out_dir}')
-        torch.save(w_mean.mean, f'{avg_out_dir}/mean.pt')
-        torch.save(w_std.mean,  f'{avg_out_dir}/std.pt')
+        torch.save(w_val.mean, f'{avg_out_dir}/val.pt')
+        torch.save(w_sq.mean,  f'{avg_out_dir}/sq.pt')
 
 if __name__ == '__main__':
     main()
