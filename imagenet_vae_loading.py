@@ -18,6 +18,7 @@ import math
 
 import k_diffusion as K
 from kdiff_trainer.dataset.get_dataset import get_dataset
+from kdiff_trainer.dataset_meta.get_class_captions import ClassCaptions, get_class_captions
 from kdiff_trainer.vae.attn.null_attn_processor import NullAttnProcessor
 from kdiff_trainer.vae.attn.natten_attn_processor import NattenAttnProcessor
 from kdiff_trainer.vae.attn.qkv_fusion import fuse_vae_qkv
@@ -75,6 +76,10 @@ def main():
     
     config = K.config.load_config(args.config, use_json5=args.config.endswith('.jsonc'))
     dataset_config = config['dataset']
+    # an imagefolder dataset will yield a 2-List[Tensor] of image, class
+    # a huggingface dataset will yield a Dict {image_key: Tensor, class_key: Tensor}
+    image_key: Union[int, str] = dataset_config.get('image_key', 0)
+    class_key: Union[int, str] = dataset_config.get('class_key', 1)
 
     if args.seed is not None:
         seeds = torch.randint(-2 ** 63, 2 ** 63 - 1, [accelerator.num_processes], generator=torch.Generator().manual_seed(args.seed))
@@ -89,12 +94,13 @@ def main():
         ]
     )
 
+    class_captions: Optional[ClassCaptions] = get_class_captions(dataset_config['classes_to_captions']) if 'classes_to_captions' in dataset_config else None
     train_set: Union[Dataset, IterableDataset] = get_dataset(
         dataset_config,
         config_dir=Path(args.config).parent,
         uses_crossattn=False,
         tf=tf,
-        class_captions=None,
+        class_captions=class_captions,
     )
     try:
         dataset_len_estimate: int = len(train_set)
@@ -172,12 +178,15 @@ def main():
         w_sq: Optional[Welford] = None
 
     samples_output = 0
-    it: Iterator[List[Tensor]] = iter(train_dl)
+    it: Iterator[Union[List[Tensor], Dict[str, Tensor]]] = iter(train_dl)
     with sink_ctx as sink:
         for batch_ix, batch in enumerate(tqdm(it, total=batches_estimate)):
-            assert isinstance(batch, list)
-            assert len(batch) == 2, "batch item was not the expected length of 2. perhaps class labels are missing. use dataset type imagefolder-class or wds-class, to get class labels."
-            images, classes = batch
+            # dataset types such as 'imagefolder' will be lists, 'huggingface' will be dicts
+            assert isinstance(batch, list) or isinstance(batch, dict)
+            if isinstance(batch, list):
+                assert len(batch) == 2, "batch item was not the expected length of 2. perhaps class labels are missing. use dataset type imagefolder-class or wds-class, to get class labels."
+            images = batch[image_key]
+            classes = batch[class_key]
             images = images.to(vae.dtype)
             # transform pipeline's ToTensor() gave us [0, 1]
             # but VAE wants [-1, 1]
