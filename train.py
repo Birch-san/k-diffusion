@@ -645,8 +645,8 @@ def main():
         batch: Samples = generate_batch_of_samples()
         if is_latent:
             latents = batch.x_0
-            # these are pretty big shifts, and they seem to begin pretty close to mean-centered anyway, so let's disregard
-            # latents = latents + channel_means.to(latents.dtype)
+            # commented-out because we're not convinced it's a credible estimate of the mean shift, so may harm more than help
+            # latents = latents + (channel_means*channel_scales).to(latents.dtype)
             # scale-and-shift from standard Gaussian to VAE per-channel average distribution
             latents = latents / channel_scales.to(latents.dtype)
             del batch.x_0
@@ -855,8 +855,8 @@ def main():
                         aug_cond = None
                         # scale-and-shift from VAE per-channel average distribution, to standard Gaussian
                         reals.mul_(channel_scales.to(reals.dtype))
-                        # these are pretty big shifts, and they seem to begin pretty close to mean-centered anyway, so let's disregard
-                        # reals.sub_(channel_means.to(reals.dtype))
+                        # commented-out because (with my current estimate) it seems to move mean further from zero. they're actually pretty close to mean-centered to begin with
+                        # reals.sub_((channel_means*channel_scales).to(reals.dtype))
                         reals = reals.detach()
                     else:
                         reals, _, aug_cond = batch[image_key]
