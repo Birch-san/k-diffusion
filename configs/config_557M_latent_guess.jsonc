@@ -1,0 +1,69 @@
+{
+  "model": {
+    "type": "image_transformer_v2",
+    "input_channels": 4,
+    // this becomes 512x512px
+    "input_size": [64, 64],
+    // deliberately reduced patch size (from 4 -> 2) compared to RGB
+    "patch_size": [2, 2],
+    "depths": [2, 2, 16],
+    // for latent: we might need to increase base width compared to RGB's 128
+    // or maybe not? because we reduced the patch size
+    "widths": [384, 768, 1536],
+    "loss_config": "karras",
+    // latents want snr, not soft-min-snr
+    "loss_weighting": "snr",
+    "loss_scales": 1,
+    "dropout_rate": [0.0, 0.0, 0.0],
+    "mapping_dropout_rate": 0.0,
+    // we can't even do karras augmentations because we precomputed our latents
+    "augment_prob": 0.0,
+    "sigma_data": 0.5,
+    "sigma_min": 1e-2,
+    // reduced sigma_max (160 -> 80) since canvas size is smaller than the 256px that this config came from.
+    // we might even be able to halve it again to 40.
+    "sigma_max": 80,
+    "sigma_sample_density": {
+      "type": "cosine-interpolated"
+    }
+  },
+  "dataset": {
+    "type": "wds-class",
+    "latents": true,
+    // !! fill location in yourself (including the number of .tar files) !!
+    "location": "/fsx/home-tmabraham/datasets/imagenet-latents-512/wds/{00000..00069}.tar",
+    "wds_latent_key": "latent.pth",
+    "class_cond_key": "cls.txt",
+    "num_classes": 1000,
+    "classes_to_captions": "imagenet-1k",
+    "estimated_samples": 1281167,
+    // !! update these with the better estimates that you have !!
+    // Tanishq encoded latents for all of imagenet so will have better estimates than these oxford-flowers estimates
+    // see the val.pt and sq.pt that were output by imagenet_vae_loading.py; check the avg folder, next to wds folder
+    // the trainer doesn't currently apply the shift-by-channel_means, since it seems to move the latents further from being mean-centered
+    // torch.load('val.pt', weights_only=True).tolist()
+    "channel_means": [-4.304563999176025, -0.2269466072320938, 1.6671230792999268, 0.579799473285675],
+    // torch.load('sq.pt', weights_only=True).tolist()
+    "channel_squares": [80.77391815185547, 48.63021469116211, 62.30317687988281, 28.040388107299805]
+    // std is:
+    // torch.sqrt(squares - means**2)
+    // [7.889527320861816, 6.969842910766602, 7.715171813964844, 5.263479709625244]
+    // its reciprocal is actually close to SDXL VAE's scaling_factor of 0.13025
+    // [0.12675030529499054, 0.1434752494096756, 0.12961474061012268, 0.1899883896112442]
+  },
+  "optimizer": {
+    "type": "adamw",
+    "lr": 5e-4,
+    "betas": [0.9, 0.95],
+    "eps": 1e-8,
+    "weight_decay": 1e-2
+  },
+  "lr_sched": {
+    "type": "constant"
+  },
+  "ema_sched": {
+    "type": "inverse",
+    "power": 0.75,
+    "max_value": 0.9999
+  }
+}
