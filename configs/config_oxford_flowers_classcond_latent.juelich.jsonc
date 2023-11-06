@@ -15,13 +15,14 @@
       {"type": "global", "d_head": 64}
     ],
     "loss_config": "karras",
-    "loss_weighting": "soft-min-snr",
+    // latents want snr, not soft-min-snr
+    "loss_weighting": "snr",
     "dropout_rate": [0.0, 0.0, 0.1],
     "mapping_dropout_rate": 0.0,
     "augment_prob": 0.0,
     "sigma_data": 0.5,
     "sigma_min": 1e-2,
-    // reduce sigma_max (160 -> 80) since canvas size is smaller than the 128px that this config came from
+    // reduced sigma_max (160 -> 80) since canvas size is smaller than the 128px that this config came from
     "sigma_max": 80,
     "sigma_sample_density": {
       "type": "cosine-interpolated"
@@ -37,7 +38,12 @@
     "classes_to_captions": "oxford-flowers",
     "num_classes": 102,
     "estimated_samples": 7169,
+    // Tanishq encoded latents for all of imagenet so will have better estimates than these
+    // see the val.pt and sq.pt that were output by imagenet_vae_loading.py; check the avg folder, next to wds folder
+    // the trainer doesn't currently apply the shift-by-channel_means, since it seems to move the latents further from being mean-centered
+    // torch.load('val.pt', weights_only=True).tolist()
     "channel_means": [-4.304563999176025, -0.2269466072320938, 1.6671230792999268, 0.579799473285675],
+    // torch.load('sq.pt', weights_only=True).tolist()
     "channel_squares": [80.77391815185547, 48.63021469116211, 62.30317687988281, 28.040388107299805]
     // std is:
     // torch.sqrt(squares - means**2)
