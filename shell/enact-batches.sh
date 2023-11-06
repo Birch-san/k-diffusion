@@ -57,6 +57,8 @@ mkdir -p "$LOG_DIR"
 EXISTING_LOGS="$(echo "$LOG_DIR"/*.txt)"
 [[ "$EXISTING_LOGS" ]] && echo "$EXISTING_LOGS" | xargs -n 1 rm
 
+# this jq will fail if there are comments in your config! you may want to manually hardcode the image size here.
+# or update it to parse using python+json5 instead.
 IMAGE_SIZE="$(cd "$KDIFF_DIR" && jq -r '.model.input_size[0]' <"$MODEL_CONFIG")"
 if [[ ! "$IMAGE_SIZE" =~ ^[0-9]+$ ]]; then
   die "Received non-integer image size from model config '$MODEL_CONFIG' (via jq query '.model.input_size[0]'): '$IMAGE_SIZE'"
