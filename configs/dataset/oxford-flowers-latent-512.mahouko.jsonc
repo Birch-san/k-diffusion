@@ -1,0 +1,23 @@
+{
+  "model": { "type": "none" },
+  "dataset": {
+    "type": "wds-class",
+    "latents": true,
+    "location": "/sdb/ml-data/oxford-flowers-latents-512/wds/00000.tar",
+    "wds_latent_key": "latent.pth",
+    "class_cond_key": "cls.txt",
+    "classes_to_captions": "oxford-flowers",
+    "num_classes": 102,
+    "estimated_samples": 7169,
+    // average obtained after SDXL VAE-encoding all of imagenet-1k at 512px
+    // torch.load('val.pt', weights_only=True).tolist()
+    "channel_means": [-0.614419162273407, 0.7538465261459351, 0.13934417068958282, 1.8618509769439697],
+    // torch.load('sq.pt', weights_only=True).tolist()
+    "channel_squares": [68.558349609375, 36.764495849609375, 47.566280364990234, 33.02168655395508]
+    // std is:
+    // torch.sqrt(squares - means**2)
+    // [8.257168769836426, 6.016328811645508, 6.895423412322998, 5.436469078063965]
+    // its reciprocal is actually close to SDXL VAE's scaling_factor of 0.13025
+    // [0.12110688537359238, 0.16621431708335876, 0.14502373337745667, 0.18394291400909424]
+  }
+}
