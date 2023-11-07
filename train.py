@@ -337,15 +337,12 @@ def main():
         # for FSDP support: model must be prepared separately and before optimizers
         inner_model_ema = accelerator.prepare(inner_model_ema)
 
-    tf = transforms.Compose([
-        transforms.Resize(size[0], interpolation=transforms.InterpolationMode.BICUBIC),
-        transforms.CenterCrop(size[0]),
-        K.augmentation.KarrasAugmentationPipeline(model_config['augment_prob'], disable_all=model_config['augment_prob'] == 0),
-    ])
-
     is_latent: bool = dataset_config.get('latents', False)
     if is_latent:
-        train_set: Union[Dataset, IterableDataset] = get_latent_dataset(dataset_config)
+        # we don't do resize & center-crop, because our latent datasets are precomputed
+        # (via imagenet_vae_loading.py) for a given canvas size
+        augment = transforms.RandomHorizontalFlip(model_config['augment_prob'])
+        train_set: Union[Dataset, IterableDataset] = get_latent_dataset(dataset_config, augment=augment)
         channel_means: FloatTensor = torch.tensor(dataset_config['channel_means'])
         channel_squares: FloatTensor = torch.tensor(dataset_config['channel_squares'])
         channel_stds: FloatTensor = torch.sqrt(channel_squares - channel_means**2)
@@ -367,6 +364,11 @@ def main():
         vae.eval()
         accelerator.prepare(vae, normalizer)
     else:
+        tf = transforms.Compose([
+            transforms.Resize(size[0], interpolation=transforms.InterpolationMode.BICUBIC),
+            transforms.CenterCrop(size[0]),
+            K.augmentation.KarrasAugmentationPipeline(model_config['augment_prob'], disable_all=model_config['augment_prob'] == 0),
+        ])
         train_set: Union[Dataset, IterableDataset] = get_dataset(
             dataset_config,
             config_dir=Path(args.config).parent,

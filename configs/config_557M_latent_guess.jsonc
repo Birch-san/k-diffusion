@@ -16,8 +16,9 @@
     "loss_scales": 1,
     "dropout_rate": [0.0, 0.0, 0.0],
     "mapping_dropout_rate": 0.0,
-    // we can't even do karras augmentations because we precomputed our latents
-    "augment_prob": 0.0,
+    // for latent datasets, only horizontal flip augmentations are enabled. if you want other augmentations:
+    // you'd have to precompute that into the dataset via imagenet_vae_loading.py
+    "augment_prob": 0.5,
     "sigma_data": 0.5,
     "sigma_min": 1e-2,
     // reduced sigma_max (160 -> 80) since canvas size is smaller than the 256px that this config came from.
