@@ -9,12 +9,15 @@
     "classes_to_captions": "oxford-flowers",
     "num_classes": 102,
     "estimated_samples": 7169,
-    "channel_means": [-4.3245, -0.2387,  1.6597,  0.5779],
-    "channel_squares": [80.7550, 48.5894, 62.1183, 28.0308]
+    // average obtained after SDXL VAE-encoding all of imagenet-1k at 512px
+    // torch.load('val.pt', weights_only=True).tolist()
+    "channel_means": [-0.614419162273407, 0.7538465261459351, 0.13934417068958282, 1.8618509769439697],
+    // torch.load('sq.pt', weights_only=True).tolist()
+    "channel_squares": [68.558349609375, 36.764495849609375, 47.566280364990234, 33.02168655395508]
     // std is:
     // torch.sqrt(squares - means**2)
-    // [7.8895, 6.9698, 7.7152, 5.2635]
+    // [8.257168769836426, 6.016328811645508, 6.895423412322998, 5.436469078063965]
     // its reciprocal is actually close to SDXL VAE's scaling_factor of 0.13025
-    // [0.1267507446606249, 0.14347613991793165, 0.1296142679386147, 0.18998765080269783]
+    // [0.12110688537359238, 0.16621431708335876, 0.14502373337745667, 0.18394291400909424]
   },
 }

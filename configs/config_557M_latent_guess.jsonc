@@ -37,19 +37,16 @@
     "num_classes": 1000,
     "classes_to_captions": "imagenet-1k",
     "estimated_samples": 1281167,
-    // !! update these with the better estimates that you have !!
-    // Tanishq encoded latents for all of imagenet so will have better estimates than these oxford-flowers estimates
-    // see the val.pt and sq.pt that were output by imagenet_vae_loading.py; check the avg folder, next to wds folder
-    // the trainer doesn't currently apply the shift-by-channel_means, since it seems to move the latents further from being mean-centered
+    // average obtained after SDXL VAE-encoding all of imagenet-1k at 512px
     // torch.load('val.pt', weights_only=True).tolist()
-    "channel_means": [-4.304563999176025, -0.2269466072320938, 1.6671230792999268, 0.579799473285675],
+    "channel_means": [-0.614419162273407, 0.7538465261459351, 0.13934417068958282, 1.8618509769439697],
     // torch.load('sq.pt', weights_only=True).tolist()
-    "channel_squares": [80.77391815185547, 48.63021469116211, 62.30317687988281, 28.040388107299805]
+    "channel_squares": [68.558349609375, 36.764495849609375, 47.566280364990234, 33.02168655395508]
     // std is:
     // torch.sqrt(squares - means**2)
-    // [7.889527320861816, 6.969842910766602, 7.715171813964844, 5.263479709625244]
+    // [8.257168769836426, 6.016328811645508, 6.895423412322998, 5.436469078063965]
     // its reciprocal is actually close to SDXL VAE's scaling_factor of 0.13025
-    // [0.12675030529499054, 0.1434752494096756, 0.12961474061012268, 0.1899883896112442]
+    // [0.12110688537359238, 0.16621431708335876, 0.14502373337745667, 0.18394291400909424]
   },
   "optimizer": {
     "type": "adamw",
