@@ -51,6 +51,7 @@ from kdiff_trainer.iteration.batched import batched
 from kdiff_trainer.dataset_meta.get_class_captions import get_class_captions, ClassCaptions
 from kdiff_trainer.dataset.get_dataset import get_dataset
 from kdiff_trainer.dataset.get_latent_dataset import get_latent_dataset
+from kdiff_trainer.normalize import Normalize
 
 SinkOutput = TypedDict('SinkOutput', {
     '__key__': str,
@@ -348,7 +349,8 @@ def main():
         channel_means: FloatTensor = torch.tensor(dataset_config['channel_means'], device=accelerator.device, dtype=torch.float32).unsqueeze(-1).unsqueeze(-1).unsqueeze(0)
         channel_squares: FloatTensor = torch.tensor(dataset_config['channel_squares'], device=accelerator.device, dtype=torch.float32).unsqueeze(-1).unsqueeze(-1).unsqueeze(0)
         channel_stds: FloatTensor = torch.sqrt(channel_squares - channel_means**2)
-        channel_scales: FloatTensor = 1/channel_stds
+        normalizer = Normalize(channel_means, channel_stds)
+        del channel_means, channel_squares, channel_stds
 
         # we're just using this to decode demo latents
         from diffusers import AutoencoderKL
@@ -363,7 +365,7 @@ def main():
         maybe_vae_upsample: int = 1 << (len(vae.config.block_out_channels) - 1)
         del vae.encoder
         vae.eval()
-        accelerator.prepare(vae)
+        accelerator.prepare(vae, normalizer)
     else:
         train_set: Union[Dataset, IterableDataset] = get_dataset(
             dataset_config,
@@ -644,11 +646,9 @@ def main():
 
         batch: Samples = generate_batch_of_samples()
         if is_latent:
-            latents = batch.x_0
-            # commented-out because we're not convinced it's a credible estimate of the mean shift, so may harm more than help
-            # latents = latents + (channel_means*channel_scales).to(latents.dtype)
-            # scale-and-shift from standard Gaussian to VAE per-channel average distribution
-            latents = latents / channel_scales.to(latents.dtype)
+            latents: FloatTensor = batch.x_0
+            # adapt from standard gaussian onto VAE's distribution
+            normalizer.inverse_(latents)
             del batch.x_0
             # VAE decoder outputs a FloatTensor with range approx ±1
             decoded: DecoderOutput = vae.decode(latents.to(vae.dtype))
@@ -851,13 +851,10 @@ def main():
                 with accelerator.accumulate(model):
                     if is_latent:
                         # we are using a dataset of precomputed latents, which means any augmenting would've had to have been done before it was encoded
-                        reals = batch[image_key]
+                        reals: FloatTensor = batch[image_key]
                         aug_cond = None
-                        # scale-and-shift from VAE per-channel average distribution, to standard Gaussian
-                        reals.mul_(channel_scales.to(reals.dtype))
-                        # commented-out because (with my current estimate) it seems to move mean further from zero. they're actually pretty close to mean-centered to begin with
-                        # reals.sub_((channel_means*channel_scales).to(reals.dtype))
-                        reals = reals.detach()
+                        # scale-and-shift from VAE distribution, to standard Gaussian
+                        normalizer.forward_(reals)
                     else:
                         reals, _, aug_cond = batch[image_key]
                     class_cond, extra_args = None, {}
