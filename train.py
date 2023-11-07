@@ -346,8 +346,8 @@ def main():
     is_latent: bool = dataset_config.get('latents', False)
     if is_latent:
         train_set: Union[Dataset, IterableDataset] = get_latent_dataset(dataset_config)
-        channel_means: FloatTensor = torch.tensor(dataset_config['channel_means'], device=accelerator.device, dtype=torch.float32).unsqueeze(-1).unsqueeze(-1).unsqueeze(0)
-        channel_squares: FloatTensor = torch.tensor(dataset_config['channel_squares'], device=accelerator.device, dtype=torch.float32).unsqueeze(-1).unsqueeze(-1).unsqueeze(0)
+        channel_means: FloatTensor = torch.tensor(dataset_config['channel_means'])
+        channel_squares: FloatTensor = torch.tensor(dataset_config['channel_squares'])
         channel_stds: FloatTensor = torch.sqrt(channel_squares - channel_means**2)
         normalizer = Normalize(channel_means, channel_stds)
         del channel_means, channel_squares, channel_stds
