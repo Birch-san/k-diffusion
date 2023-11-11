@@ -1,0 +1,76 @@
+{
+  "model": {
+    "type": "image_transformer_v2",
+    // channels increased 3 -> 4
+    "input_channels": 4,
+    // canvas reduced from 128px rgb to 64 latent (decodes to 512px)
+    "input_size": [64, 64],
+    // patch size reduced from 4 -> 2
+    "patch_size": [2, 2],
+    "mapping_width": 768,
+    "mapping_depth": 1,
+    "depths": [2, 11],
+    "widths": [384, 768],
+    "self_attns": [
+      {"type": "neighborhood", "kernel_size": 7, "d_head": 64},
+      {"type": "global", "d_head": 64}
+    ],
+    "loss_config": "karras",
+    // snr is intentional. latents want snr
+    "loss_weighting": "snr",
+    "loss_scales": 1,
+    "dropout_rate": [0.0, 0.0],
+    "mapping_dropout_rate": 0.0,
+    "augment_prob": 0.0,
+    
+    "up_proj_act": "GEGLU",
+    "pos_emb_type": "ROPE",
+    
+    // sigma data increased 0.5 -> 1.0 (latents have variance of 1)
+    "sigma_data": 1.0,
+    "sigma_min": 1e-2,
+    // ordinarily we'd halve sigma_max when we halve canvas side length, but we had to double it
+    // due to doubling sigma_data, so it cancels out
+    "sigma_max": 160,
+    "sigma_sample_density": {
+      "type": "cosine-interpolated"
+    }
+  },
+  "dataset": {
+    "type": "wds-class",
+    "latents": true,
+    "class_cond_key": "cls.txt",
+    "wds_latent_key": "latent.pth",
+    // ask Tanishq for the SDXL0.9-encoded imagenet-1k WDS dataset
+    "location": "./latent_shards/wds/{00000..00128}.tar",
+    "classes_to_captions": "imagenet-1k",
+    "num_classes": 1000,
+    "estimated_samples": 1281167,
+    "cond_dropout_rate": 0.1,
+    // average obtained after SDXL VAE-encoding all of imagenet-1k at 512px
+    // torch.load('val.pt', weights_only=True).tolist()
+    "channel_means": [-0.614419162273407, 0.7538465261459351, 0.13934417068958282, 1.8618509769439697],
+    // torch.load('sq.pt', weights_only=True).tolist()
+    "channel_squares": [68.558349609375, 36.764495849609375, 47.566280364990234, 33.02168655395508]
+    // std is:
+    // torch.sqrt(squares - means**2)
+    // [8.257168769836426, 6.016328811645508, 6.895423412322998, 5.436469078063965]
+    // its reciprocal is actually close to SDXL VAE's scaling_factor of 0.13025
+    // [0.12110688537359238, 0.16621431708335876, 0.14502373337745667, 0.18394291400909424]
+  },
+  "optimizer": {
+    "type": "adamw",
+    "lr": 5e-4,
+    "betas": [0.9, 0.95],
+    "eps": 1e-8,
+    "weight_decay": 1e-2
+  },
+  "lr_sched": {
+    "type": "constant"
+  },
+  "ema_sched": {
+    "type": "inverse",
+    "power": 0.75,
+    "max_value": 0.9999
+  }
+}
