@@ -58,8 +58,8 @@ def main():
     device = torch.device('cuda')
     vae.to(device).eval()
 
-    train_dl = data.DataLoader(train_set, 2, shuffle=not isinstance(train_set, data.IterableDataset), drop_last=False,
-                               num_workers=2, persistent_workers=True, pin_memory=True)
+    train_dl = data.DataLoader(train_set, 4, shuffle=not isinstance(train_set, data.IterableDataset), drop_last=False,
+                               num_workers=1, persistent_workers=True, pin_memory=True)
 
     it: Iterator[List[Tensor]] = iter(train_dl)
     for batch_ix, batch in enumerate(tqdm(it)):
@@ -67,13 +67,28 @@ def main():
         assert len(batch) == 2, "batch item was not the expected length of 2. perhaps class labels are missing. use dataset type imagefolder-class or wds-class, to get class labels."
         latents, classes = batch
         latents = latents.to(device, vae.dtype)
-        with inference_mode():
-            decoded: DecoderOutput = vae.decode(latents)
-        # note: if you wanted to _train_ on these latents, you would want to scale-and-shift them after this
-        rgb: FloatTensor = decoded.sample
-        rgb: FloatTensor = rgb.div(2).add_(.5).clamp_(0,1)
-        print('batch', batch_ix, 'classes:', classes.tolist())
-        save_image(rgb, f'out/vae-decode-test/batch.{batch_ix}.jpg')
+        # with inference_mode():
+        #     decoded: DecoderOutput = vae.decode(latents)
+        # # note: if you wanted to _train_ on these latents, you would want to scale-and-shift them after this
+        # rgb: FloatTensor = decoded.sample
+        # rgb: FloatTensor = rgb.div(2).add_(.5).clamp_(0,1)
+        # print('batch', batch_ix, 'classes:', classes.tolist())
+        # # for sample_ix, sample in enumerate(rgb.unbind()):
+        # #     save_image(sample.unsqueeze(0), f'out/vae-decode-test/b{batch_ix}_s{sample_ix}.roundtrip.post.png')
+        # save_image(rgb[3].unsqueeze(0), f'out/vae-decode-test/b{batch_ix}_s{3}.roundtrip.aug.png')
+        
+
+        break
+
+def aug(vae: AutoencoderKL, latents: FloatTensor) -> FloatTensor:
+    # latents = latents.flip((-2,-1,),)
+    latents = latents.roll((10, 10), (-2, -1))
+    with inference_mode():
+        decoded: DecoderOutput = vae.decode(latents)
+    rgb: FloatTensor = decoded.sample
+    rgb: FloatTensor = rgb.div(2).add_(.5).clamp_(0,1)
+    save_image(rgb, f'out/vae-decode-test/b{0}_s{3}.roundtrip.aug.png')
+aug(vae, latents[3].unsqueeze(0))
 
 if __name__ == '__main__':
     main()

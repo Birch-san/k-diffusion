@@ -29,7 +29,7 @@ from tqdm.auto import tqdm
 from typing import Any, List, Optional, Union, Protocol
 from PIL import Image
 from dataclasses import dataclass
-from typing import Optional, TypedDict, Generator, Callable, Literal, Dict, Any
+from typing import Optional, TypedDict, Generator, Callable, Literal, Dict, Any, NamedTuple
 from contextlib import nullcontext
 from itertools import islice
 from tqdm import tqdm
@@ -50,7 +50,7 @@ from kdiff_trainer.tqdm_ctx import tqdm_environ, TqdmOverrides
 from kdiff_trainer.iteration.batched import batched
 from kdiff_trainer.dataset_meta.get_class_captions import get_class_captions, ClassCaptions
 from kdiff_trainer.dataset.get_dataset import get_dataset
-from kdiff_trainer.dataset.get_latent_dataset import get_latent_dataset
+from kdiff_trainer.dataset.get_latent_dataset import get_latent_dataset, TensorMapper
 from kdiff_trainer.normalize import Normalize
 
 SinkOutput = TypedDict('SinkOutput', {
@@ -63,6 +63,10 @@ ClassCondSinkOutput = TypedDict('ClassCondSinkOutput', {
     'img.png': Image.Image,
     'cls.txt': str,
 })
+
+class AugmentedLatent(NamedTuple):
+    augmented: FloatTensor
+    original: FloatTensor
 
 @dataclass
 class Samples:
@@ -341,7 +345,8 @@ def main():
     if is_latent:
         # we don't do resize & center-crop, because our latent datasets are precomputed
         # (via imagenet_vae_loading.py) for a given canvas size
-        augment = transforms.RandomHorizontalFlip(model_config['augment_prob'])
+        hflip = transforms.RandomHorizontalFlip(model_config['augment_prob'])
+        augment: TensorMapper[AugmentedLatent] = lambda latent: AugmentedLatent(hflip(latent), latent)
         train_set: Union[Dataset, IterableDataset] = get_latent_dataset(dataset_config, augment=augment)
         channel_means: FloatTensor = torch.tensor(dataset_config['channel_means'])
         channel_squares: FloatTensor = torch.tensor(dataset_config['channel_squares'])
@@ -538,7 +543,21 @@ def main():
             observe_samples_fake: Optional[Callable[[FloatTensor], None]] = None
         if accelerator.is_main_process:
             print('Computing features for reals...')
-        reals_features = K.evaluation.compute_features(accelerator, lambda x: next(train_iter)[image_key][1], extractor, args.evaluate_n, args.batch_size, observe_samples=observe_samples_real)
+        if is_latent:
+            def sample_fn(cur_batch_size: int) -> FloatTensor:
+                samples = next(train_iter)
+                augmented_imgs: AugmentedLatent = samples[image_key]
+                _, latent_orig = augmented_imgs
+                return latent_orig
+        else:
+            def sample_fn(cur_batch_size: int) -> FloatTensor:
+                samples = next(train_iter)
+                augmented_imgs = samples[image_key]
+                # KarrasAugmentationPipeline maps images to 3-tuples:
+                # image, image_orig, aug_cond
+                _, image_orig, _ = augmented_imgs
+                return image_orig
+        reals_features = K.evaluation.compute_features(accelerator, sample_fn, extractor, args.evaluate_n, args.batch_size, observe_samples=observe_samples_real)
         if accelerator.is_main_process and not args.evaluate_only:
             fid_cols: List[str] = ['fid']
             if args.torchmetrics_fid:
@@ -852,8 +871,8 @@ def main():
 
                 with accelerator.accumulate(model):
                     if is_latent:
-                        # we are using a dataset of precomputed latents, which means any augmenting would've had to have been done before it was encoded
-                        reals: FloatTensor = batch[image_key]
+                        aug_out: AugmentedLatent = batch[image_key]
+                        reals, _ = aug_out
                         aug_cond = None
                         # scale-and-shift from VAE distribution, to standard Gaussian
                         normalizer.forward_(reals)
