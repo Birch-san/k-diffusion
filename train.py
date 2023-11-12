@@ -343,8 +343,7 @@ def main():
     if is_latent:
         # we don't do resize & center-crop, because our latent datasets are precomputed
         # (via imagenet_vae_loading.py) for a given canvas size
-        augment = transforms.RandomHorizontalFlip(model_config['augment_prob'])
-        train_set: Union[Dataset, IterableDataset] = get_latent_dataset(dataset_config, augment=augment)
+        train_set: Union[Dataset, IterableDataset] = get_latent_dataset(dataset_config)
         channel_means: FloatTensor = torch.tensor(dataset_config['channel_means'])
         channel_squares: FloatTensor = torch.tensor(dataset_config['channel_squares'])
         channel_stds: FloatTensor = torch.sqrt(channel_squares - channel_means**2)
