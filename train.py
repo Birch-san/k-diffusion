@@ -902,9 +902,16 @@ def main():
                     if is_latent:
                         # we are using a dataset of precomputed latents, which means any augmenting would've had to have been done before it was encoded
                         reals: FloatTensor = batch[image_key]
+                        prenorm_means: FloatTensor = reals.mean((0, -1, -2))
+                        prenorm_vars: FloatTensor = reals.var((0, -1, -2))
+                        sdscaled: FloatTensor = reals * vae.config.scaling_factor
+                        sdscaled_means: FloatTensor = sdscaled.mean((0, -1, -2))
+                        sdscaled_vars: FloatTensor = sdscaled.var((0, -1, -2))
                         aug_cond = None
                         # scale-and-shift from VAE distribution, to standard Gaussian
                         normalizer.forward_(reals)
+                        normed_means: FloatTensor = reals.mean((0, -1, -2))
+                        normed_vars: FloatTensor = reals.var((0, -1, -2))
                     else:
                         reals, _, aug_cond = batch[image_key]
                     class_cond, extra_args = None, {}
@@ -974,11 +981,20 @@ def main():
                     if args.gns:
                         log_dict['gradient_noise_scale'] = gns_stats.get_gns()
                     if is_latent:
-                        observed_means = reals.mean((0, -1, -2))
-                        observed_vars = reals.var((0, -1, -2))
-                        for channel_ix, (observed_mean, observed_var) in enumerate(zip(observed_means.unbind(), observed_vars.unbind())):
-                            log_dict[f'latent_reals_normed/mean/{channel_ix}'] = observed_mean.item()
-                            log_dict[f'latent_reals_normed/var/{channel_ix}'] = observed_var.item()
+                        for channel_ix, (prenorm_mean, prenorm_var, sdscaled_mean, sdscaled_var, normed_mean, normed_var) in enumerate(zip(
+                            prenorm_means.unbind(),
+                            prenorm_vars.unbind(),
+                            sdscaled_means.unbind(),
+                            sdscaled_vars.unbind(),
+                            normed_means.unbind(),
+                            normed_vars.unbind(),
+                        )):
+                            log_dict[f'latent_reals_prenorm/mean/{channel_ix}'] = prenorm_mean.item()
+                            log_dict[f'latent_reals_prenorm/var/{channel_ix}'] = prenorm_var.item()
+                            log_dict[f'latent_reals_sdscaled/mean/{channel_ix}'] = sdscaled_mean.item()
+                            log_dict[f'latent_reals_sdscaled/var/{channel_ix}'] = sdscaled_var.item()
+                            log_dict[f'latent_reals_normed/mean/{channel_ix}'] = normed_mean.item()
+                            log_dict[f'latent_reals_normed/var/{channel_ix}'] = normed_var.item()
                     wandb.log(log_dict, step=step)
 
                 step += 1
