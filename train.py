@@ -188,6 +188,8 @@ def main():
                    help='the wandb project name (specify this to enable wandb)')
     p.add_argument('--wandb-save-model', action='store_true',
                    help='save model to wandb')
+    p.add_argument('--enable-vae-slicing', action='store_true',
+                   help='limit VAE decode (demo, eval) to batch-of-1 to save memory')
     args = p.parse_args()
 
     mp.set_start_method(args.start_method)
@@ -358,6 +360,9 @@ def main():
             subfolder='vae',
             torch_dtype=torch.bfloat16,
         )
+        if args.enable_vae_slicing:
+            # serialize VAE decode jobs into batch-of-1
+            vae.enable_slicing()
         # 8x upsample
         maybe_vae_upsample: int = 1 << (len(vae.config.block_out_channels) - 1)
         del vae.encoder
@@ -538,7 +543,32 @@ def main():
             observe_samples_fake: Optional[Callable[[FloatTensor], None]] = None
         if accelerator.is_main_process:
             print('Computing features for reals...')
-        reals_features = K.evaluation.compute_features(accelerator, lambda x: next(train_iter)[image_key][1], extractor, args.evaluate_n, args.batch_size, observe_samples=observe_samples_real)
+        if is_latent:
+            def sample_fn(cur_batch_size: int) -> FloatTensor:
+                samples = next(train_iter)
+                # we don't augment latents, because even flipped latents are pretty OOD (they look damaged when decoded).
+                # translations sort of work, but decoder only resolves convolution padding artifacts when they're at the canvas edge.
+                # basically if we want augmentations: we should do it in RGB before encoding (which is awkward if precomputing, or
+                # slow if done live).
+                latents: FloatTensor = samples[image_key]
+                # adapt from standard gaussian onto VAE's distribution
+                normalizer.inverse_(latents)
+                with torch.inference_mode():
+                    decoded: DecoderOutput = vae.decode(latents.to(vae.dtype))
+                del latents
+                rgb: FloatTensor = decoded.sample
+                # cast here to ensure we have same dtype as our fakes (which come out of the float32 ema_model).
+                # rgb datasets have float32 reals because they go through KarrasAugmentationPipeline, which returns a float32 tensor.
+                return rgb.float()
+        else:
+            def sample_fn(cur_batch_size: int) -> FloatTensor:
+                samples = next(train_iter)
+                augmented_imgs = samples[image_key]
+                # KarrasAugmentationPipeline maps images to 3-tuples:
+                # image, image_orig, aug_cond
+                _, image_orig, _ = augmented_imgs
+                return image_orig
+        reals_features = K.evaluation.compute_features(accelerator, sample_fn, extractor, args.evaluate_n, args.batch_size, observe_samples=observe_samples_real)
         if accelerator.is_main_process and not args.evaluate_only:
             fid_cols: List[str] = ['fid']
             if args.torchmetrics_fid:
@@ -627,6 +657,15 @@ def main():
         while True:
             with tqdm_environ(TqdmOverrides(position=1)):
                 batch: Samples = generate_batch_of_samples()
+            if is_latent:
+                latents: FloatTensor = batch.x_0
+                # adapt from standard gaussian onto VAE's distribution
+                normalizer.inverse_(latents)
+                del batch.x_0
+                # VAE decoder outputs a FloatTensor with range approx ±1
+                decoded: DecoderOutput = vae.decode(latents.to(vae.dtype))
+                batch.x_0 = decoded.sample
+                del decoded, latents
             if accelerator.is_main_process:
                 pils: List[Image.Image] = to_pil_images(batch.x_0)
                 if isinstance(batch, ClassConditionalSamples):
@@ -713,6 +752,16 @@ def main():
                 model_fn = make_cfg_model_fn(model_ema)
             x_0: FloatTensor = do_sample(model_fn, x, sigmas, extra_args=extra_args, disable=True)
             return x_0
+        if is_latent:
+            # wrap sample_fn
+            sample_latent = sample_fn
+            def sample_fn(n: int) -> FloatTensor:
+                latents: FloatTensor = sample_latent(n)
+                # adapt from standard gaussian onto VAE's distribution
+                normalizer.inverse_(latents)
+                with torch.inference_mode():
+                    decoded: DecoderOutput = vae.decode(latents.to(vae.dtype))
+                return decoded.sample.type_as(latents)
         fakes_features = K.evaluation.compute_features(accelerator, sample_fn, extractor, args.evaluate_n, args.batch_size, observe_samples=observe_samples_fake)
         if accelerator.is_main_process:
             fid = K.evaluation.fid(fakes_features, reals_features)
