@@ -973,6 +973,12 @@ def main():
                     }
                     if args.gns:
                         log_dict['gradient_noise_scale'] = gns_stats.get_gns()
+                    if is_latent:
+                        observed_means = reals.mean((0, -1, -2))
+                        observed_vars = reals.var((0, -1, -2))
+                        for channel_ix, (observed_mean, observed_var) in enumerate(zip(observed_means.unbind(), observed_vars.unbind())):
+                            log_dict[f'latent_reals_normed/mean/{channel_ix}'] = observed_mean.item()
+                            log_dict[f'latent_reals_normed/var/{channel_ix}'] = observed_var.item()
                     wandb.log(log_dict, step=step)
 
                 step += 1
