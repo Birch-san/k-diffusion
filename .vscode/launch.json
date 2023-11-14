@@ -245,6 +245,15 @@
       ]
     },
     {
+      "name": "Python: Subset WDS",
+      "type": "python",
+      "request": "launch",
+      "program": "subset_wds.py",
+      "console": "integratedTerminal",
+      "justMyCode": false,
+      "args": []
+    },
+    {
       "name": "Python: Inference OpenAI",
       "type": "python",
       "request": "launch",
