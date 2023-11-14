@@ -22,6 +22,10 @@ def get_class_captions(
         from kdiff_trainer.dataset_meta.imagenet_1k import class_labels
         labels_excl_uncond: List[str] = class_labels
         dataset_label_to_canonical_label: Optional[Tuple[int, ...]] = None
+    elif classes_to_captions == 'imagenet-100':
+        from kdiff_trainer.dataset_meta.imagenet_1k import class_labels
+        labels_excl_uncond: List[str] = class_labels[:100]
+        dataset_label_to_canonical_label: Optional[Tuple[int, ...]] = None
     else:
         raise ValueError(f"Never heard of classes_to_captions '{classes_to_captions}'")
     demo_class_captions: List[str] = [*labels_excl_uncond, '<UNCOND>']

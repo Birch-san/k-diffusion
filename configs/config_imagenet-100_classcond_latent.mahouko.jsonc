@@ -39,7 +39,7 @@
     "location": "/sdb/ml-data/imagenet-latents-512-subset/{00000..00001}.tar",
     "wds_latent_key": "latent.pth",
     "class_cond_key": "cls.txt",
-    "classes_to_captions": "imagenet-1k",
+    "classes_to_captions": "imagenet-100",
     "num_classes": 100,
     "estimated_samples": 10000,
     // average obtained after SDXL VAE-encoding all of imagenet-1k at 512px
