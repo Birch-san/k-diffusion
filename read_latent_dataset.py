@@ -7,6 +7,7 @@ from typing import Union, Dict, Any, List, Iterator
 from diffusers import AutoencoderKL
 from diffusers.models.autoencoder_kl import DecoderOutput
 from tqdm import tqdm
+from os import makedirs
 
 import k_diffusion as K
 from kdiff_trainer.dataset.get_latent_dataset import get_latent_dataset
@@ -14,9 +15,9 @@ from kdiff_trainer.vae.attn.null_attn_processor import NullAttnProcessor
 from kdiff_trainer.vae.attn.natten_attn_processor import NattenAttnProcessor
 from kdiff_trainer.vae.attn.qkv_fusion import fuse_vae_qkv
 
-
 def main():
-    config_path = 'configs/dataset/latent-test.jsonc'
+    # config_path = 'configs/dataset/latent-test.jsonc'
+    config_path = 'configs/dataset/imagenet-100-latent.mahouko.jsonc'
     config = K.config.load_config(config_path, use_json5=config_path.endswith('.jsonc'))
     dataset_config = config['dataset']
     train_set: Union[Dataset, IterableDataset] = get_latent_dataset(dataset_config)
@@ -58,22 +59,40 @@ def main():
     device = torch.device('cuda')
     vae.to(device).eval()
 
-    train_dl = data.DataLoader(train_set, 2, shuffle=not isinstance(train_set, data.IterableDataset), drop_last=False,
-                               num_workers=2, persistent_workers=True, pin_memory=True)
+    # shuffle=not isinstance(train_set, data.IterableDataset)
+    shuffle=False
+    batch_size=16
+    train_dl = data.DataLoader(train_set, batch_size, shuffle=shuffle, drop_last=False,
+                               num_workers=8, persistent_workers=True, pin_memory=True)
 
+    out_root = 'out/imagenet100-validate'
+    makedirs(out_root, exist_ok=True)
+    class_sample_count: Dict[int, int] = {}
     it: Iterator[List[Tensor]] = iter(train_dl)
-    for batch_ix, batch in enumerate(tqdm(it)):
+    for batch in tqdm(it, desc='exporting', total=10000//batch_size, unit='batch'):
         assert isinstance(batch, list)
         assert len(batch) == 2, "batch item was not the expected length of 2. perhaps class labels are missing. use dataset type imagefolder-class or wds-class, to get class labels."
         latents, classes = batch
         latents = latents.to(device, vae.dtype)
         with inference_mode():
             decoded: DecoderOutput = vae.decode(latents)
+        del latents
         # note: if you wanted to _train_ on these latents, you would want to scale-and-shift them after this
         rgb: FloatTensor = decoded.sample
+        del decoded
         rgb: FloatTensor = rgb.div(2).add_(.5).clamp_(0,1)
-        print('batch', batch_ix, 'classes:', classes.tolist())
-        save_image(rgb, f'out/vae-decode-test/batch.{batch_ix}.jpg')
+        for sample, cls in zip(rgb.unbind(), classes.unbind()):
+            cls_: int = cls.item()
+            out_dir = f'{out_root}/{cls_}'
+            if cls_ not in class_sample_count:
+                makedirs(out_dir, exist_ok=True)
+                class_sample_count[cls_] = 0
+            sample_ix: int = class_sample_count[cls_]
+            save_image(sample, f'{out_dir}/{sample_ix}.png')
+            class_sample_count[cls_] += 1
+        del sample, cls
+    
+    print('class sample count:', class_sample_count)
 
 if __name__ == '__main__':
     main()
