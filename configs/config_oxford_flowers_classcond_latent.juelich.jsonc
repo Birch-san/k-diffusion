@@ -22,10 +22,11 @@
     // for latent datasets, only horizontal flip augmentations are enabled. if you want other augmentations:
     // you'd have to precompute that into the dataset via imagenet_vae_loading.py
     "augment_prob": 0.5,
-    "sigma_data": 0.5,
+    "sigma_data": 1.0,
     "sigma_min": 1e-2,
-    // reduced sigma_max (160 -> 80) since canvas size is smaller than the 128px that this config came from
-    "sigma_max": 80,
+    // ordinarily we'd halve sigma_max when we halve canvas side length, but we had to double it
+    // due to doubling sigma_data, so it cancels out
+    "sigma_max": 160,
     "sigma_sample_density": {
       "type": "cosine-interpolated"
     }
