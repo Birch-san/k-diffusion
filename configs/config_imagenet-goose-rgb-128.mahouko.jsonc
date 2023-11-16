@@ -1,0 +1,51 @@
+{
+  "model": {
+    "type": "image_transformer_v2",
+    "input_channels": 3,
+    "input_size": [128, 128],
+    "patch_size": [4, 4],
+    "depths": [2, 2, 4],
+    "widths": [128, 256, 512],
+    "self_attns": [
+      {"type": "neighborhood", "d_head": 64, "kernel_size": 7},
+      {"type": "neighborhood", "d_head": 64, "kernel_size": 7},
+      {"type": "global", "d_head": 64}
+    ],
+    "loss_config": "karras",
+    "loss_weighting": "soft-min-snr",
+    "dropout_rate": [0.0, 0.0, 0.1],
+    "mapping_dropout_rate": 0.0,
+    "augment_prob": 0.0,
+    "sigma_data": 0.5,
+    "sigma_min": 1e-2,
+    "sigma_max": 160,
+    "sigma_sample_density": {
+      "type": "cosine-interpolated"
+    }
+  },
+  "dataset": {
+    "type": "wds-class",
+    "location": "/sdb/ml-data/imagenet-128-geese/00000.tar",
+    "wds_image_key": "img.png",
+    "class_cond_key": "cls.txt",
+    "classes_to_captions": "imagenet-geese",
+    "num_classes": 100,
+    "estimated_samples": 1000
+  },
+  "optimizer": {
+    "type": "adamw",
+    "lr": 5e-4,
+    "betas": [0.9, 0.95],
+    "eps": 1e-8,
+    "weight_decay": 1e-3
+  },
+  "lr_sched": {
+    "type": "constant",
+    "warmup": 0.0
+  },
+  "ema_sched": {
+    "type": "inverse",
+    "power": 0.75,
+    "max_value": 0.9999
+  }
+}

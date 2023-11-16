@@ -1,0 +1,72 @@
+{
+  "model": {
+    "type": "image_transformer_v2",
+    // increased channels from 3 -> 4
+    "input_channels": 4,
+    "input_size": [64, 64],
+    // deliberately reduced patch size (from 4 -> 2) compared to RGB
+    "patch_size": [2, 2],
+    "depths": [2, 2, 4],
+    // for latent: we might need to increase base width compared to RGB's 128
+    // or maybe not? because we reduced the patch size
+    "widths": [128, 256, 512],
+    "self_attns": [
+      {"type": "neighborhood", "d_head": 64, "kernel_size": 7},
+      {"type": "neighborhood", "d_head": 64, "kernel_size": 7},
+      {"type": "global", "d_head": 64}
+    ],
+    "loss_config": "karras",
+    // latents want snr, not soft-min-snr
+    "loss_weighting": "snr",
+    "dropout_rate": [0.0, 0.0, 0.1],
+    "mapping_dropout_rate": 0.0,
+    // haven't implemented any augmentations for latent datasets yet
+    "augment_prob": 0.0,
+    // latents have a variance of 1
+    "sigma_data": 1.0,
+    "sigma_min": 1e-2,
+    // same sigma_max as rgb 128px, because although halving canvas size should mean we'd halve sigma_max:
+    // this is cancelled out by the fact that doubling sigma_data means we should double sigma_max.
+    "sigma_max": 160,
+    "sigma_sample_density": {
+      "type": "cosine-interpolated"
+    }
+  },
+  "dataset": {
+    "type": "wds-class",
+    "latents": true,
+    "location": "/sdb/ml-data/imagenet-latents-512-geese/00000.tar",
+    "wds_latent_key": "latent.pth",
+    "class_cond_key": "cls.txt",
+    "classes_to_captions": "imagenet-geese",
+    // I know we only use class 99, but since I didn't remap it we need to allocate all the classes before it too
+    "num_classes": 100,
+    "estimated_samples": 1000,
+    // average obtained after SDXL VAE-encoding all of imagenet-1k at 512px
+    // torch.load('val.pt', weights_only=True).tolist()
+    "channel_means": [-0.614419162273407, 0.7538465261459351, 0.13934417068958282, 1.8618509769439697],
+    // torch.load('sq.pt', weights_only=True).tolist()
+    "channel_squares": [68.558349609375, 36.764495849609375, 47.566280364990234, 33.02168655395508]
+    // std is:
+    // torch.sqrt(squares - means**2)
+    // [8.257168769836426, 6.016328811645508, 6.895423412322998, 5.436469078063965]
+    // its reciprocal is actually close to SDXL VAE's scaling_factor of 0.13025
+    // [0.12110688537359238, 0.16621431708335876, 0.14502373337745667, 0.18394291400909424]
+  },
+  "optimizer": {
+    "type": "adamw",
+    "lr": 5e-4,
+    "betas": [0.9, 0.95],
+    "eps": 1e-8,
+    "weight_decay": 1e-3
+  },
+  "lr_sched": {
+    "type": "constant",
+    "warmup": 0.0
+  },
+  "ema_sched": {
+    "type": "inverse",
+    "power": 0.75,
+    "max_value": 0.9999
+  }
+}
