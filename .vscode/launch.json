@@ -254,6 +254,15 @@
       "args": []
     },
     {
+      "name": "Python: Subset WDS RGB",
+      "type": "python",
+      "request": "launch",
+      "program": "subset_wds_rgb.py",
+      "console": "integratedTerminal",
+      "justMyCode": false,
+      "args": []
+    },
+    {
       "name": "Python: Inference OpenAI",
       "type": "python",
       "request": "launch",
