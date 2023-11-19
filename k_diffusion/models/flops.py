@@ -1,6 +1,9 @@
 from contextlib import contextmanager
 import math
 import threading
+from torch.nn import Linear
+from torch import FloatTensor
+from typing import Tuple
 
 
 state = threading.local()
@@ -52,3 +55,7 @@ def op_natten(q, k, v, kernel_size):
     *q_rest, d_q = q
     *_, d_v = v
     return math.prod(q_rest) * (d_q + d_v) * kernel_size**2
+
+def hook_linear_flops(module: Linear, args: Tuple[FloatTensor, ...], _):
+    x, *_ = args
+    op(op_linear, x.shape, module.weight.shape)

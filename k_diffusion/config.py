@@ -256,7 +256,9 @@ def make_model(config):
             input_size = config['input_size']
         inner_model = DiT_models[config['dit_variant']](input_size=input_size, in_channels=config['input_channels'], class_dropout_prob=0, num_classes=config['num_classes'], learn_sigma=False)
         from .external import DiTDenoiser
+        from .models.dit_flops import instrument_dit_flops
         model = DiTDenoiser(inner_model)
+        instrument_dit_flops(model)
     else:
         raise ValueError(f'unsupported model type {config["type"]}')
     return model
