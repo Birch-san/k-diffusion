@@ -186,6 +186,8 @@ def main():
                    help='the wandb group name')
     p.add_argument('--wandb-project', type=str,
                    help='the wandb project name (specify this to enable wandb)')
+    p.add_argument('--wandb-run-name', type=str, default=None,
+                   help='the wandb run name')
     p.add_argument('--wandb-save-model', action='store_true',
                    help='save model to wandb')
     p.add_argument('--enable-vae-slicing', action='store_true',
@@ -284,7 +286,7 @@ def main():
         log_config = vars(deepcopy(args))
         log_config['config'] = config
         log_config['parameters'] = K.utils.n_params((inner_model or inner_model_ema))
-        wandb.init(project=args.wandb_project, entity=args.wandb_entity, group=args.wandb_group, config=log_config, save_code=True)
+        wandb.init(project=args.wandb_project, entity=args.wandb_entity, group=args.wandb_group, config=log_config, name=args.wandb_run_name, save_code=True)
 
     if do_train:
         lr = opt_config['lr'] if args.lr is None else args.lr
