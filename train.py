@@ -277,7 +277,7 @@ def main():
         # inner_model_ema.compile()
 
     if accelerator.is_main_process:
-        print(f'Parameters: {K.utils.n_params((inner_model or inner_model_ema)):,}')
+        print(f'Parameters: {K.utils.n_params((inner_model or inner_model_ema)):,} for {args.config}')
 
     # If logging to wandb, initialize the run
     use_wandb = accelerator.is_main_process and args.wandb_project
@@ -440,7 +440,7 @@ def main():
             extra_args[class_cond_key] = torch.zeros([1], dtype=torch.long, device=device)
         (inner_model or inner_model_ema)(x, sigma, **extra_args)
         if accelerator.is_main_process:
-            print(f"Forward pass GFLOPs: {fc.flops / 1_000_000_000:,.3f}", flush=True)
+            print(f"Forward pass GFLOPs: {fc.flops / 1_000_000_000:,.3f} for {args.config}", flush=True)
 
     if args.output_to_subdir:
         run_root = f'{args.out_root}/{args.name}'
