@@ -52,7 +52,7 @@ from kdiff_trainer.dataset_meta.get_class_captions import get_class_captions, Cl
 from kdiff_trainer.dataset.get_dataset import get_dataset
 from kdiff_trainer.dataset.get_latent_dataset import get_latent_dataset
 from kdiff_trainer.normalize import Normalize
-from kdiff_trainer.migrations.migrate_model import register_load_hooks, forge_opt_state
+from kdiff_trainer.migrations.migrate_model import register_load_hooks, should_discard_optim_state
 
 SinkOutput = TypedDict('SinkOutput', {
     '__key__': str,
@@ -480,8 +480,8 @@ def main():
         if do_train:
             register_load_hooks(unwrap(model.inner_model), ckpt_config['model'], model_config)
             unwrap(model.inner_model).load_state_dict(ckpt['model'])
-            forge_opt_state(unwrap(model.inner_model), opt.optimizer, ckpt['step'], ckpt['opt'], ckpt_config['model'], model_config)
-            opt.load_state_dict(ckpt['opt'])
+            if not should_discard_optim_state(unwrap(model.inner_model), ckpt_config['model'], model_config):
+                opt.load_state_dict(ckpt['opt'])
             sched.load_state_dict(ckpt['sched'])
             ema_sched.load_state_dict(ckpt['ema_sched'])
             ema_stats = ckpt.get('ema_stats', ema_stats)
