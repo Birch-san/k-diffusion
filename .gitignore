@@ -13,4 +13,4 @@ wandb/*
 /out-srun/
 /out-eval/
 /log/
-/imagenet/
+/imagenet
