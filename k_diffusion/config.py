@@ -63,6 +63,7 @@ def load_config(path_or_dict: Union[str, Dict], use_json5=False):
             'mapping_d_ff': None,
             'mapping_cond_dim': 0,
             'mapping_dropout_rate': 0.,
+            'mapping_ffn_up_bias': False,
             'd_ffs': None,
             'self_attns': None,
             'dropout_rate': None,
@@ -71,6 +72,7 @@ def load_config(path_or_dict: Union[str, Dict], use_json5=False):
             'has_variance': False,
             'up_proj_act': 'GEGLU',
             'pos_emb_type': 'ROPE',
+            'ffn_up_bias': False,
         },
         'optimizer': {
             'type': 'adamw',
@@ -234,7 +236,7 @@ def make_model(config):
                     dropout=xattn_dropout,
                 )
             levels.append(models.image_transformer_v2.LevelSpec(depth, width, d_ff, self_attn, cross_attn_spec, dropout))
-        mapping = models.image_transformer_v2.MappingSpec(config['mapping_depth'], config['mapping_width'], config['mapping_d_ff'], config['mapping_dropout_rate'])
+        mapping = models.image_transformer_v2.MappingSpec(config['mapping_depth'], config['mapping_width'], config['mapping_d_ff'], config['mapping_dropout_rate'], config['mapping_ffn_up_bias'])
         model = models.ImageTransformerDenoiserModelV2(
             levels=levels,
             mapping=mapping,
@@ -246,6 +248,7 @@ def make_model(config):
             up_proj_act=config["up_proj_act"],
             pos_emb_type=config["pos_emb_type"],
             input_size=config['input_size'],
+            ffn_up_bias=config['ffn_up_bias'],
         )
     elif config['type'] == 'dit':
         from .models.dit import DiT_models
