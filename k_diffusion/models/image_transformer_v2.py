@@ -585,11 +585,11 @@ class CrossAttentionBlock(nn.Module):
 
 
 class FeedForwardBlock(nn.Module):
-    def __init__(self, d_model, d_ff, cond_features, dropout=0.0, up_proj_type=LinearGEGLU):
+    def __init__(self, d_model, d_ff, cond_features, dropout=0.0, up_proj_type=LinearGEGLU, up_bias=False):
         super().__init__()
         self.norm = AdaRMSNorm(d_model, cond_features)
         # TODO swap here
-        self.up_proj = apply_wd(up_proj_type(d_model, d_ff, bias=False))
+        self.up_proj = apply_wd(up_proj_type(d_model, d_ff, bias=up_bias))
         self.dropout = nn.Dropout(dropout)
         self.down_proj = apply_wd(zero_init(Linear(d_ff, d_model, bias=False)))
 
@@ -603,11 +603,11 @@ class FeedForwardBlock(nn.Module):
 
 
 class GlobalTransformerLayer(nn.Module):
-    def __init__(self, d_model, d_ff, d_head, cond_features, cross_attn: Optional[CrossAttentionBlock] = None, dropout=0.0, up_proj_type=LinearGEGLU, use_rope=True):
+    def __init__(self, d_model, d_ff, d_head, cond_features, cross_attn: Optional[CrossAttentionBlock] = None, dropout=0.0, up_proj_type=LinearGEGLU, use_rope=True, ffn_up_bias=False):
         super().__init__()
         self.self_attn = SelfAttentionBlock(d_model, d_head, cond_features, dropout=dropout, use_rope=use_rope)
         self.cross_attn = cross_attn
-        self.ff = FeedForwardBlock(d_model, d_ff, cond_features, dropout=dropout, up_proj_type=up_proj_type)
+        self.ff = FeedForwardBlock(d_model, d_ff, cond_features, dropout=dropout, up_proj_type=up_proj_type, up_bias=ffn_up_bias)
 
     def forward(self, x, pos, cond, crossattn_cond: Optional[FloatTensor] = None, crossattn_mask: Optional[BoolTensor] = None):
         x = checkpoint(self.self_attn, x, pos, cond)
@@ -618,11 +618,11 @@ class GlobalTransformerLayer(nn.Module):
 
 
 class NeighborhoodTransformerLayer(nn.Module):
-    def __init__(self, d_model, d_ff, d_head, cond_features, kernel_size, cross_attn: Optional[CrossAttentionBlock] = None, dropout=0.0, up_proj_type=LinearGEGLU, use_rope=True):
+    def __init__(self, d_model, d_ff, d_head, cond_features, kernel_size, cross_attn: Optional[CrossAttentionBlock] = None, dropout=0.0, up_proj_type=LinearGEGLU, use_rope=True, ffn_up_bias=False):
         super().__init__()
         self.self_attn = NeighborhoodSelfAttentionBlock(d_model, d_head, cond_features, kernel_size, dropout=dropout, use_rope=use_rope)
         self.cross_attn = cross_attn
-        self.ff = FeedForwardBlock(d_model, d_ff, cond_features, dropout=dropout, up_proj_type=up_proj_type)
+        self.ff = FeedForwardBlock(d_model, d_ff, cond_features, dropout=dropout, up_proj_type=up_proj_type, up_bias=ffn_up_bias)
 
     def forward(self, x, pos, cond, crossattn_cond: Optional[FloatTensor] = None, crossattn_mask: Optional[BoolTensor] = None):
         x = checkpoint(self.self_attn, x, pos, cond)
@@ -633,12 +633,12 @@ class NeighborhoodTransformerLayer(nn.Module):
 
 
 class ShiftedWindowTransformerLayer(nn.Module):
-    def __init__(self, d_model, d_ff, d_head, cond_features, window_size, index, cross_attn: Optional[CrossAttentionBlock] = None, dropout=0.0, up_proj_type=LinearGEGLU, use_rope=True):
+    def __init__(self, d_model, d_ff, d_head, cond_features, window_size, index, cross_attn: Optional[CrossAttentionBlock] = None, dropout=0.0, up_proj_type=LinearGEGLU, use_rope=True, ffn_up_bias=False):
         super().__init__()
         window_shift = window_size // 2 if index % 2 == 1 else 0
         self.self_attn = ShiftedWindowSelfAttentionBlock(d_model, d_head, cond_features, window_size, window_shift, dropout=dropout, use_rope=use_rope)
         self.cross_attn = cross_attn
-        self.ff = FeedForwardBlock(d_model, d_ff, cond_features, dropout=dropout, up_proj_type=up_proj_type)
+        self.ff = FeedForwardBlock(d_model, d_ff, cond_features, dropout=dropout, up_proj_type=up_proj_type, up_bias=ffn_up_bias)
 
     def forward(self, x, pos, cond, crossattn_cond: Optional[FloatTensor] = None, crossattn_mask: Optional[BoolTensor] = None):
         x = checkpoint(self.self_attn, x, pos, cond)
@@ -649,9 +649,9 @@ class ShiftedWindowTransformerLayer(nn.Module):
 
 
 class NoAttentionTransformerLayer(nn.Module):
-    def __init__(self, d_model, d_ff, cond_features, dropout=0.0, up_proj_type=LinearGEGLU):
+    def __init__(self, d_model, d_ff, cond_features, dropout=0.0, up_proj_type=LinearGEGLU, ffn_up_bias=False):
         super().__init__()
-        self.ff = FeedForwardBlock(d_model, d_ff, cond_features, dropout=dropout, up_proj_type=up_proj_type)
+        self.ff = FeedForwardBlock(d_model, d_ff, cond_features, dropout=dropout, up_proj_type=up_proj_type, up_bias=ffn_up_bias)
 
     def forward(self, x, pos, cond, crossattn_cond: Optional[FloatTensor] = None, crossattn_mask: Optional[BoolTensor] = None):
         x = checkpoint(self.ff, x, cond)
@@ -668,11 +668,11 @@ class Level(nn.ModuleList):
 # Mapping network
 
 class MappingFeedForwardBlock(nn.Module):
-    def __init__(self, d_model, d_ff, dropout=0.0, up_proj_type=LinearGEGLU):
+    def __init__(self, d_model, d_ff, dropout=0.0, up_proj_type=LinearGEGLU, up_bias=False):
         super().__init__()
         self.norm = RMSNorm(d_model)
         # TODO swap here
-        self.up_proj = apply_wd(up_proj_type(d_model, d_ff, bias=False))
+        self.up_proj = apply_wd(up_proj_type(d_model, d_ff, bias=up_bias))
         self.dropout = nn.Dropout(dropout)
         self.down_proj = apply_wd(zero_init(Linear(d_ff, d_model, bias=False)))
 
@@ -686,10 +686,10 @@ class MappingFeedForwardBlock(nn.Module):
 
 
 class MappingNetwork(nn.Module):
-    def __init__(self, n_layers, d_model, d_ff, dropout=0.0, up_proj_type=LinearGEGLU):
+    def __init__(self, n_layers, d_model, d_ff, dropout=0.0, up_proj_type=LinearGEGLU, ffn_up_bias=False):
         super().__init__()
         self.in_norm = RMSNorm(d_model)
-        self.blocks = nn.ModuleList([MappingFeedForwardBlock(d_model, d_ff, dropout=dropout, up_proj_type=up_proj_type) for _ in range(n_layers)])
+        self.blocks = nn.ModuleList([MappingFeedForwardBlock(d_model, d_ff, dropout=dropout, up_proj_type=up_proj_type, up_bias=ffn_up_bias) for _ in range(n_layers)])
         self.out_norm = RMSNorm(d_model)
 
     def forward(self, x):
@@ -786,12 +786,13 @@ class MappingSpec:
     width: int
     d_ff: int
     dropout: float
+    ffn_up_bias: bool
 
 
 # Model class
 
 class ImageTransformerDenoiserModelV2(nn.Module):
-    def __init__(self, levels: Sequence[LevelSpec], mapping: MappingSpec, in_channels, out_channels, patch_size, num_classes=0, mapping_cond_dim=0, up_proj_act: Literal["GELU", "GEGLU"] = "GEGLU", pos_emb_type: Literal["ROPE", "additive"] = "ROPE", input_size: Optional[Union[int, Tuple[int, int]]] = None):
+    def __init__(self, levels: Sequence[LevelSpec], mapping: MappingSpec, in_channels, out_channels, patch_size, num_classes=0, mapping_cond_dim=0, up_proj_act: Literal["GELU", "GEGLU"] = "GEGLU", pos_emb_type: Literal["ROPE", "additive"] = "ROPE", input_size: Optional[Union[int, Tuple[int, int]]] = None, ffn_up_bias=False):
         super().__init__()
         self.num_classes = num_classes
 
@@ -823,7 +824,7 @@ class ImageTransformerDenoiserModelV2(nn.Module):
             pos_embed = get_2d_sincos_pos_embed(self.pos_emb.shape[-1], int(num_patches**0.5))
             self.pos_emb.data.copy_(torch.from_numpy(pos_embed).float().reshape(*self.pos_emb.shape))
 
-        self.mapping = tag_module(MappingNetwork(mapping.depth, mapping.width, mapping.d_ff, dropout=mapping.dropout, up_proj_type=up_proj_type), "mapping")
+        self.mapping = tag_module(MappingNetwork(mapping.depth, mapping.width, mapping.d_ff, dropout=mapping.dropout, up_proj_type=up_proj_type, ffn_up_bias=mapping.ffn_up_bias), "mapping")
 
         self.down_levels, self.up_levels = nn.ModuleList(), nn.ModuleList()
         for i, spec in enumerate(levels):
@@ -836,13 +837,13 @@ class ImageTransformerDenoiserModelV2(nn.Module):
                 dropout=spec.cross_attn.dropout,
             )
             if isinstance(spec.self_attn, GlobalAttentionSpec):
-                 layer_factory = lambda _: GlobalTransformerLayer(spec.width, spec.d_ff, spec.self_attn.d_head, mapping.width, cross_attn=cross_attn, dropout=spec.dropout, up_proj_type=up_proj_type, use_rope=(self.pos_emb_type == "ROPE"))
+                layer_factory = lambda _: GlobalTransformerLayer(spec.width, spec.d_ff, spec.self_attn.d_head, mapping.width, cross_attn=cross_attn, dropout=spec.dropout, up_proj_type=up_proj_type, use_rope=(self.pos_emb_type == "ROPE"), ffn_up_bias=ffn_up_bias)
             elif isinstance(spec.self_attn, NeighborhoodAttentionSpec):
-                layer_factory = lambda _: NeighborhoodTransformerLayer(spec.width, spec.d_ff, spec.self_attn.d_head, mapping.width, spec.self_attn.kernel_size, cross_attn=cross_attn, dropout=spec.dropout, up_proj_type=up_proj_type, use_rope=(self.pos_emb_type == "ROPE"))
+                layer_factory = lambda _: NeighborhoodTransformerLayer(spec.width, spec.d_ff, spec.self_attn.d_head, mapping.width, spec.self_attn.kernel_size, cross_attn=cross_attn, dropout=spec.dropout, up_proj_type=up_proj_type, use_rope=(self.pos_emb_type == "ROPE"), ffn_up_bias=ffn_up_bias)
             elif isinstance(spec.self_attn, ShiftedWindowAttentionSpec):
-                layer_factory = lambda i: ShiftedWindowTransformerLayer(spec.width, spec.d_ff, spec.self_attn.d_head, mapping.width, spec.self_attn.window_size, i, cross_attn=cross_attn, dropout=spec.dropout, up_proj_type=up_proj_type, use_rope=(self.pos_emb_type == "ROPE"))
+                layer_factory = lambda i: ShiftedWindowTransformerLayer(spec.width, spec.d_ff, spec.self_attn.d_head, mapping.width, spec.self_attn.window_size, i, cross_attn=cross_attn, dropout=spec.dropout, up_proj_type=up_proj_type, use_rope=(self.pos_emb_type == "ROPE"), ffn_up_bias=ffn_up_bias)
             elif isinstance(spec.self_attn, NoAttentionSpec):
-                layer_factory = lambda _: NoAttentionTransformerLayer(spec.width, spec.d_ff, mapping.width, dropout=spec.dropout, up_proj_type=up_proj_type)
+                layer_factory = lambda _: NoAttentionTransformerLayer(spec.width, spec.d_ff, mapping.width, dropout=spec.dropout, up_proj_type=up_proj_type, ffn_up_bias=ffn_up_bias)
             else:
                 raise ValueError(f"unsupported self attention spec {spec.self_attn}")
 
