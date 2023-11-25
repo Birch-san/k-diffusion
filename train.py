@@ -52,6 +52,7 @@ from kdiff_trainer.dataset_meta.get_class_captions import get_class_captions, Cl
 from kdiff_trainer.dataset.get_dataset import get_dataset
 from kdiff_trainer.dataset.get_latent_dataset import get_latent_dataset
 from kdiff_trainer.normalize import Normalize
+from kdiff_trainer.migrations.migrate_model import register_load_hooks, forge_opt_state
 
 SinkOutput = TypedDict('SinkOutput', {
     '__key__': str,
@@ -471,9 +472,15 @@ def main():
         if accelerator.is_main_process:
             print(f'Resuming from {ckpt_path}...')
         ckpt = torch.load(ckpt_path, map_location='cpu')
+        ckpt_config = ckpt['config']
+        # merge in any new config defaults that have been introduced since the checkpoint was created
+        ckpt_config = K.config.load_config(ckpt_config)
+        register_load_hooks(unwrap(model_ema.inner_model), ckpt_config['model'], model_config)
         unwrap(model_ema.inner_model).load_state_dict(ckpt['model_ema'])
         if do_train:
+            register_load_hooks(unwrap(model.inner_model), ckpt_config['model'], model_config)
             unwrap(model.inner_model).load_state_dict(ckpt['model'])
+            forge_opt_state(unwrap(model.inner_model), opt.optimizer, ckpt['step'], ckpt['opt'], ckpt_config['model'], model_config)
             opt.load_state_dict(ckpt['opt'])
             sched.load_state_dict(ckpt['sched'])
             ema_sched.load_state_dict(ckpt['ema_sched'])
