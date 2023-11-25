@@ -1,6 +1,6 @@
 from typing import Dict, Callable, List
 import torch
-from torch import Tensor, zeros, zeros_like, full, tensor
+from torch import Tensor, zeros, zeros_like, full, tensor, LongTensor
 from torch.optim import Optimizer, AdamW
 from torch.nn import Module, Parameter
 from functools import partial
@@ -59,23 +59,25 @@ def forge_opt_state_vit_v2(model: Module, optim: Optimizer, step: int, new_opt_s
     opt_state_next_key: int = len(new_opt_state_dict['state'].keys())
     ffn_up_biases: List[Parameter] = []
     model.apply(partial(_discover_ffn_up_bias_params, ffn_up_biases))
+    added_items: int = 0
     param_group_ix = 1
-    group = optim.param_groups[param_group_ix]
+    optim_group = optim.param_groups[param_group_ix]
+    state_params_lens: List[int] = [len(g['params']) for g in new_opt_state_dict['param_groups']]
+    state_params_lens_cumsum: LongTensor = tensor(state_params_lens).cumsum(0)
+    state_params: List[int] = new_opt_state_dict['param_groups'][param_group_ix]['params']
     for bias in ffn_up_biases:
       new_opt_state_dict['state'][opt_state_next_key] = {
         # Deliberately host `step` on CPU if both capturable and fused are off.
         # This is because kernel launches are costly on CUDA.
         'step': full((), step, dtype=torch.float, device=bias.device)
-                    if group["capturable"] or group["fused"]
+                    if optim_group["capturable"] or optim_group["fused"]
                     else tensor(step, dtype=torch.float),
         'exp_avg': zeros_like(bias, memory_format=torch.preserve_format),
         'exp_avg_sq': zeros_like(bias, memory_format=torch.preserve_format),
       }
-      # splice this param into the right position in the params list
-      index_in_group: int = next((ix for ix, x in enumerate(group['params']) if x is bias))
-      # TODO: looks like this isn't enough. maybe we need to rewrite the indices in every param group to be monotonically increasing?
-      new_opt_state_dict['param_groups'][param_group_ix]['params'].insert(index_in_group, opt_state_next_key)
-      opt_state_next_key += 1
+      state_params.append(state_params_lens_cumsum[param_group_ix].item() + added_items)
+      added_items += 1
+    param_group_lengths: List[int] = [len(g['params']) for g in new_opt_state_dict['param_groups']]
   if new_model_config['mapping_ffn_up_bias'] and not orig_model_config['mapping_ffn_up_bias']:
     assert isinstance(optim, AdamW)
     opt_state_next_key: int = len(new_opt_state_dict['state'].keys())
