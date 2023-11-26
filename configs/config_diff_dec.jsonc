@@ -1,0 +1,56 @@
+{
+  "model": {
+    "type": "diff_dec",
+    "input_channels": 7,
+    // this becomes 256x256px
+    "input_size": [32, 32],
+    "loss_config": "karras",
+    "loss_weighting": "soft-min-snr",
+    "loss_scales": 1,
+    "augment_prob": 0.0,
+    "sigma_data": 0.5,
+    "sigma_min": 0.0,
+    "sigma_max": 20778.279296875,
+    "num_timesteps": 1024,
+    "sigma_sample_density": {
+      "type": "cosine-interpolated"
+    },
+    "lora": {
+      "rank": 64,
+      "alpha": 16,
+      "dropout": 0.0
+    }
+  },
+  "dataset": {
+    "type": "wds",
+    "latents": true,
+    "location": "/sdb/ml-data/artbench/latents/train/wds/{00000..00004}.tar",
+    "wds_latent_key": "latent.pth",
+    "estimated_samples": 50000,
+    // average obtained after SDXL VAE-encoding all of imagenet-1k at 512px
+    // torch.load('val.pt', weights_only=True).tolist()
+    "channel_means": [-0.1536690890789032, -0.7142514586448669, 0.4706766605377197, 2.24863600730896],
+    // torch.load('sq.pt', weights_only=True).tolist()
+    "channel_squares": [51.99677276611328, 30.184646606445312, 44.909732818603516, 30.234216690063477]
+    // std is:
+    // torch.sqrt(squares - means**2)
+    // [7.2092413902282715, 5.447429656982422, 6.68492317199707, 5.017753601074219]
+    // its reciprocal is actually close to SDXL VAE's scaling_factor of 0.13025
+    // [0.1387108564376831, 0.18357281386852264, 0.14959034323692322, 0.1992923617362976]
+  },
+  "optimizer": {
+    "type": "adamw",
+    "lr": 5e-4,
+    "betas": [0.9, 0.95],
+    "eps": 1e-8,
+    "weight_decay": 1e-2
+  },
+  "lr_sched": {
+    "type": "constant"
+  },
+  "ema_sched": {
+    "type": "inverse",
+    "power": 0.75,
+    "max_value": 0.9999
+  }
+}

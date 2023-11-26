@@ -13,56 +13,44 @@ from os import makedirs
 from os.path import relpath
 
 import accelerate
-import safetensors.torch as safetorch
 import torch
+import torch.nn.functional as F
 import torch._dynamo
 from torch import distributed as dist
 from torch.distributed.fsdp.fully_sharded_data_parallel import FullyShardedDataParallel as FSDP
 from torch import multiprocessing as mp
-from torch import optim, FloatTensor, LongTensor
+from torch import optim, FloatTensor
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import LRScheduler
 from torch.utils import data
 from torch.utils.data.dataset import Dataset, IterableDataset
-from torchvision import transforms, utils
+from torchvision import utils
 from tqdm.auto import tqdm
-from typing import Any, List, Optional, Union, Protocol
+from typing import Any, List, Optional, Union, Protocol, Literal, Iterator
 from PIL import Image
 from dataclasses import dataclass
-from typing import Optional, TypedDict, Generator, Callable, Literal, Dict, Any
+from typing import Optional, TypedDict, Generator, Callable, Dict, Any
 from contextlib import nullcontext
 from itertools import islice
 from tqdm import tqdm
 import numpy as np
+from diffusers import ConsistencyDecoderVAE
+from peft import LoraConfig, get_peft_model
+from peft.peft_model import PeftModel
 
 import k_diffusion as K
-from kdiff_trainer.dimensions import Dimensions
-from kdiff_trainer.make_default_grid_captioner import make_default_grid_captioner
-from kdiff_trainer.make_captioned_grid import GridCaptioner
-from kdiff_trainer.xattn.precompute_conds import precompute_conds, PrecomputedConds
-from kdiff_trainer.xattn.precomputed_cond_cfg_args import get_precomputed_cond_cfg_args
-from kdiff_trainer.xattn.make_cfg_crossattn_model import make_cfg_crossattn_model_fn
-from kdiff_trainer.xattn.get_precomputed_conds_by_ix import get_precomputed_conds_by_ix
-from kdiff_trainer.xattn.crossattn_cfg_args import CrossAttnCFGArgs
-from kdiff_trainer.xattn.crossattn_extra_args import CrossAttnExtraArgs
 from kdiff_trainer.to_pil_images import to_pil_images
 from kdiff_trainer.tqdm_ctx import tqdm_environ, TqdmOverrides
 from kdiff_trainer.iteration.batched import batched
-from kdiff_trainer.dataset_meta.get_class_captions import get_class_captions, ClassCaptions
-from kdiff_trainer.dataset.get_dataset import get_dataset
-from kdiff_trainer.dataset.get_latent_dataset import get_latent_dataset
+from kdiff_trainer.dataset.get_latent_dataset import get_latent_dataset, LatentImgPair
 from kdiff_trainer.normalize import Normalize
-from kdiff_trainer.migrations.migrate_model import register_load_hooks, should_discard_optim_state
+
+from sdxl_diff_dec.schedule import betas_for_alpha_bar, alpha_bar, get_alphas
+from sdxl_diff_dec.sd_denoiser import SDDecoderDistilled
 
 SinkOutput = TypedDict('SinkOutput', {
     '__key__': str,
     'img.png': Image.Image,
-})
-
-ClassCondSinkOutput = TypedDict('ClassCondSinkOutput', {
-    '__key__': str,
-    'img.png': Image.Image,
-    'cls.txt': str,
 })
 
 @dataclass
@@ -70,16 +58,8 @@ class Samples:
     x_0: FloatTensor
 
 @dataclass
-class ClassConditionalSamples(Samples):
-    class_cond: LongTensor
-
-@dataclass
 class Sample:
     pil: Image.Image
-
-@dataclass
-class ClassConditionalSample(Sample):
-    class_cond: int
 
 class Sampler(Protocol):
     @staticmethod
@@ -89,6 +69,14 @@ def ensure_distributed():
     if not dist.is_initialized():
         dist.init_process_group(world_size=1, rank=0, store=dist.HashStore())
 
+def find_all_conv_names(model: ConsistencyDecoderVAE) -> List[str]:
+    lora_module_names = set()
+    for name, module in model.named_modules():
+        if isinstance(module, torch.nn.Conv2d):
+            names = name.split('.')
+            lora_module_names.add(names[0] if len(names) == 1 else names[-1])
+
+    return list(lora_module_names)
 
 def main():
     p = argparse.ArgumentParser(description=__doc__,
@@ -154,15 +142,11 @@ def main():
                    help='the number of data loader workers')
     p.add_argument('--reset-ema', action='store_true',
                    help='reset the EMA')
-    p.add_argument('--resume', type=str,
-                   help='the checkpoint to resume from')
-    p.add_argument('--resume-inference', type=str,
-                   help='the inference checkpoint to resume from')
     p.add_argument('--demo-steps', type=int, default=50,
                    help='the number of steps to sample for demo grids')
     p.add_argument('--sample-n', type=int, default=64,
                    help='the number of images to sample for demo grids')
-    p.add_argument('--sampler-preset', type=str, default='dpm3', choices=['dpm2', 'dpm3', 'ddpm'],
+    p.add_argument('--sampler-preset', type=str, default='consistency', choices=['dpm2', 'dpm3', 'ddpm', 'consistency'],
                    help='whether to use the original DPM++(2M) SDE, sampler_type="heun" eta=0. config or to use DPM++(3M) SDE eta=1., which seems to get lower FID')
     p.add_argument('--save-every', type=int, default=10000,
                    help='save every this many steps')
@@ -209,13 +193,15 @@ def main():
     # use json5 parser if we wish to load .jsonc (commented) config
     config = K.config.load_config(args.config, use_json5=args.config.endswith('.jsonc'))
     model_config = config['model']
+    assert model_config['type'] == 'diff_dec'
     dataset_config = config['dataset']
     if do_train:
         opt_config = config['optimizer']
         sched_config = config['lr_sched']
         ema_sched_config = config['ema_sched']
+        lora_config = model_config['lora']
     else:
-        opt_config = sched_config = ema_sched_config = None
+        opt_config = sched_config = ema_sched_config = lora_config = None
 
     # TODO: allow non-square input sizes
     assert len(model_config['input_size']) == 2 and model_config['input_size'][0] == model_config['input_size'][1]
@@ -237,48 +223,56 @@ def main():
     demo_gen = torch.Generator().manual_seed(torch.randint(-2 ** 63, 2 ** 63 - 1, ()).item())
     elapsed = 0.0
 
-    class_captions: Optional[ClassCaptions] = get_class_captions(dataset_config['classes_to_captions']) if 'classes_to_captions' in dataset_config else None
-    
-    uses_crossattn: bool = 'cross_attn' in model_config and model_config['cross_attn']
-    if uses_crossattn:
-        assert 'demo_uncond' in dataset_config
-        assert dataset_config['demo_uncond'] == 'allzeros' or dataset_config['demo_uncond'] == 'emptystr'
-        assert class_captions is not None, "cross-attention is currently only implemented for precomputed conditions based on class labels, but your dataset config does not tell us what convention to use to produce captions from your class indices. set your config's dataset.classes_to_captions to a dataset name for which we have a mapping"
-
-    if uses_crossattn and class_captions is not None:
-        precomputed_conds: PrecomputedConds = precompute_conds(
-            accelerator=accelerator,
-            class_captions=class_captions.embed_class_captions,
-            uncond_class_ix=class_captions.uncond_class_ix,
-            encoder=model_config['cross_attn']['encoder'],
-            trust_remote_code=args.text_model_trust_remote_code,
-            hf_cache_dir=args.text_model_hf_cache_dir,
-        )
-        masked_uncond: FloatTensor = precomputed_conds.allzeros_masked_uncond if dataset_config['demo_uncond'] == 'allzeros' else precomputed_conds.emptystr_masked_uncond
+    if args.output_to_subdir:
+        run_root = f'{args.out_root}/{args.name}'
+        state_root = metrics_root = run_root
+        demo_root = f'{run_root}/demo'
+        ckpt_root = f'{run_root}/ckpt'
+        demo_file_qualifier = ''
     else:
-        precomputed_conds: Optional[PrecomputedConds] = None
-        masked_uncond: Optional[FloatTensor] = None
-
-    if model_config['type'] == 'guided_diffusion':
-        from kdiff_trainer.load_diffusion_model import construct_diffusion_model
-        # can't easily put this into K.config.make_model; would change return type and introduce dependency
-        model_, guided_diff = construct_diffusion_model(model_config['config'])
-    else:
-        model_ = K.config.make_model(config)
-        guided_diff = None
-
-    if do_train:
-        inner_model, inner_model_ema = model_, deepcopy(model_)
-    else:
-        inner_model, inner_model_ema = None, model_
-    del model_
-
-    if args.compile:
-        (inner_model or inner_model_ema).compile()
-        # inner_model_ema.compile()
+        run_root = demo_root = ckpt_root = state_root = metrics_root = args.out_root
+        demo_file_qualifier = 'demo_'
+    run_qualifier = f'{args.name}_'
 
     if accelerator.is_main_process:
-        print(f'Parameters: {K.utils.n_params((inner_model or inner_model_ema)):,} for {args.config}')
+        makedirs(run_root, exist_ok=True)
+        makedirs(state_root, exist_ok=True)
+        makedirs(metrics_root, exist_ok=True)
+        makedirs(demo_root, exist_ok=True)
+        makedirs(ckpt_root, exist_ok=True)
+
+    cvae: ConsistencyDecoderVAE = ConsistencyDecoderVAE.from_pretrained(
+        'openai/consistency-decoder',
+        variant='fp16',
+        torch_dtype=torch.float16,
+        # device_map={'': f'{device.type}:{device.index or 0}'},
+    ).eval()
+    del cvae.encoder, cvae.means, cvae.stds, cvae.decoder_scheduler
+
+    state_path = Path(f'{state_root}/{run_qualifier}state.json')
+    if state_path.exists():
+        loaded_state: Dict = json.load(open(state_path))
+        lora_ckpts: Dict[Literal['model', 'model_ema'], str] = loaded_state['lora_ckpts']
+        if do_train:
+            inner_model = PeftModel.from_pretrained(cvae, f"{state_root}/{lora_ckpts['model']}", adapter_name='model', is_trainable=True)
+        else:
+            inner_model = None
+        inner_model_ema = PeftModel.from_pretrained(cvae, f"{state_root}/{lora_ckpts['model_ema']}", adapter_name='model_ema', is_trainable=False)
+    else:
+        assert do_train
+        loaded_state: Optional[Dict] = None
+        if accelerator.is_main_process:
+            print(f'adding LoRA modules...')
+        modules = find_all_conv_names(cvae)
+        config = LoraConfig(
+            r=lora_config['rank'],
+            lora_alpha=lora_config['alpha'],
+            target_modules=modules,
+            lora_dropout=lora_config['dropout'],
+            bias="none",
+        )
+        inner_model = get_peft_model(cvae, config, adapter_name='model')
+        inner_model_ema = get_peft_model(cvae, config, adapter_name='model_ema')
 
     # If logging to wandb, initialize the run
     use_wandb = accelerator.is_main_process and args.wandb_project
@@ -286,12 +280,13 @@ def main():
         import wandb
         log_config = vars(deepcopy(args))
         log_config['config'] = config
-        log_config['parameters'] = K.utils.n_params((inner_model or inner_model_ema))
         wandb.init(project=args.wandb_project, entity=args.wandb_entity, group=args.wandb_group, config=log_config, name=args.wandb_run_name, save_code=True)
 
     if do_train:
         lr = opt_config['lr'] if args.lr is None else args.lr
-        groups = inner_model.param_groups(lr)
+        groups = [
+            {"params": [p for p in inner_model.parameters() if p.requires_grad], "lr": lr}
+        ]
         # for FSDP support: models must be prepared separately and before optimizers
         inner_model, inner_model_ema = accelerator.prepare(inner_model, inner_model_ema)
         if opt_config['type'] == 'adamw':
@@ -343,47 +338,17 @@ def main():
         inner_model_ema = accelerator.prepare(inner_model_ema)
 
     is_latent: bool = dataset_config.get('latents', False)
-    if is_latent:
-        # we don't do resize & center-crop, because our latent datasets are precomputed
-        # (via imagenet_vae_loading.py) for a given canvas size
-        train_set: Union[Dataset, IterableDataset] = get_latent_dataset(dataset_config)
-        channel_means: FloatTensor = torch.tensor(dataset_config['channel_means'])
-        channel_squares: FloatTensor = torch.tensor(dataset_config['channel_squares'])
-        channel_stds: FloatTensor = torch.sqrt(channel_squares - channel_means**2)
-        normalizer = Normalize(channel_means, channel_stds)
-        del channel_means, channel_squares, channel_stds
+    assert is_latent
 
-        # we're just using this to decode demo latents
-        from diffusers import AutoencoderKL
-        from diffusers.models.autoencoder_kl import DecoderOutput
-        vae: AutoencoderKL = AutoencoderKL.from_pretrained(
-            'stabilityai/stable-diffusion-xl-base-0.9',
-            use_safetensors=True,
-            subfolder='vae',
-            torch_dtype=torch.bfloat16,
-        )
-        if args.enable_vae_slicing:
-            # serialize VAE decode jobs into batch-of-1
-            vae.enable_slicing()
-        # 8x upsample
-        maybe_vae_upsample: int = 1 << (len(vae.config.block_out_channels) - 1)
-        del vae.encoder
-        vae.eval()
-        accelerator.prepare(vae, normalizer)
-    else:
-        tf = transforms.Compose([
-            transforms.Resize(size[0], interpolation=transforms.InterpolationMode.BICUBIC),
-            transforms.CenterCrop(size[0]),
-            K.augmentation.KarrasAugmentationPipeline(model_config['augment_prob'], disable_all=model_config['augment_prob'] == 0),
-        ])
-        train_set: Union[Dataset, IterableDataset] = get_dataset(
-            dataset_config,
-            config_dir=Path(args.config).parent,
-            uses_crossattn=uses_crossattn,
-            tf=tf,
-            class_captions=class_captions,
-        )
-        maybe_vae_upsample = 1
+    # we don't do resize & center-crop, because our latent datasets are precomputed
+    # (via imagenet_vae_loading.py) for a given canvas size
+    train_set: Union[Dataset, IterableDataset] = get_latent_dataset(dataset_config)
+    channel_means: FloatTensor = torch.tensor(dataset_config['channel_means'])
+    channel_squares: FloatTensor = torch.tensor(dataset_config['channel_squares'])
+    channel_stds: FloatTensor = torch.sqrt(channel_squares - channel_means**2)
+    normalizer = Normalize(channel_means, channel_stds)
+    del channel_means, channel_squares, channel_stds
+    accelerator.prepare(normalizer)
 
     if accelerator.is_main_process:
         try:
@@ -392,9 +357,6 @@ def main():
             pass
 
     image_key = dataset_config.get('image_key', 0)
-    num_classes = dataset_config.get('num_classes', 0)
-    cond_dropout_rate = dataset_config.get('cond_dropout_rate', 0.1)
-    class_key = dataset_config.get('class_key', 1)
 
     train_dl = data.DataLoader(train_set, args.batch_size, shuffle=not isinstance(train_set, data.IterableDataset), drop_last=True,
                                num_workers=args.num_workers, persistent_workers=True, pin_memory=True)
@@ -413,75 +375,38 @@ def main():
         gns_stats = K.gns.GradientNoiseScale()
     else:
         gns_stats = None
-    if guided_diff is None:
-        sigma_min = model_config['sigma_min']
-        sigma_max = model_config['sigma_max']
-        if do_train:
-            sample_density = K.config.make_sample_density(model_config)
-            model = K.config.make_denoiser_wrapper(config)(inner_model)
-        model_ema = K.config.make_denoiser_wrapper(config)(inner_model_ema)
-        class_cond_key = 'class_cond'
-    else:
-        from kdiff_trainer.load_diffusion_model import wrap_diffusion_model
-        model_ema = wrap_diffusion_model(inner_model_ema, guided_diff, device=accelerator.device)
-        sigma_min = model_ema.sigma_min.item()
-        sigma_max = model_ema.sigma_max.item()
-        if do_train:
-            sample_density = partial(K.utils.rand_uniform, min_value=0, max_value=guided_diff.num_timesteps-1)
-            model = wrap_diffusion_model(inner_model, guided_diff, device=accelerator.device)
-        else:
-            model_ema.requires_grad_(False).eval()
-        class_cond_key = 'y'
-    
-    with torch.no_grad(), K.models.flops.flop_counter() as fc:
-        x = torch.zeros([1, model_config['input_channels'], size[0], size[1]], device=device)
-        sigma = torch.ones([1], device=device)
-        extra_args = {}
-        if getattr(unwrap((inner_model or inner_model_ema)), "num_classes", 0):
-            extra_args[class_cond_key] = torch.zeros([1], dtype=torch.long, device=device)
-        (inner_model or inner_model_ema)(x, sigma, **extra_args)
-        if accelerator.is_main_process:
-            print(f"Forward pass GFLOPs: {fc.flops / 1_000_000_000:,.3f} for {args.config}", flush=True)
 
-    if args.output_to_subdir:
-        run_root = f'{args.out_root}/{args.name}'
-        state_root = metrics_root = run_root
-        demo_root = f'{run_root}/demo'
-        ckpt_root = f'{run_root}/ckpt'
-        demo_file_qualifier = ''
-    else:
-        run_root = demo_root = ckpt_root = state_root = metrics_root = args.out_root
-        demo_file_qualifier = 'demo_'
-    run_qualifier = f'{args.name}_'
+    num_timesteps: int = model_config['num_timesteps']
+    betas = betas_for_alpha_bar(num_timesteps, alpha_bar, device=device)
+    alphas: FloatTensor = get_alphas(betas)
+    alphas_cumprod: FloatTensor = alphas.cumprod(dim=0)
 
-    if accelerator.is_main_process:
-        makedirs(run_root, exist_ok=True)
-        makedirs(state_root, exist_ok=True)
-        makedirs(metrics_root, exist_ok=True)
-        makedirs(demo_root, exist_ok=True)
-        makedirs(ckpt_root, exist_ok=True)
+    if do_train:
+        sample_density = partial(K.utils.rand_uniform, min_value=0, max_value=num_timesteps-1)
+        model = SDDecoderDistilled(
+            inner_model,
+            alphas_cumprod,
+            total_timesteps=num_timesteps,
+            n_distilled_steps=64,
+            dtype=torch.float32,
+        )
+    model_ema = SDDecoderDistilled(
+        inner_model_ema,
+        alphas_cumprod,
+        total_timesteps=num_timesteps,
+        n_distilled_steps=64,
+        dtype=torch.float32,
+    )
+    sigma_min: float = model_ema.sigma_min.item()
+    sigma_max: float = model_ema.sigma_max.item()
 
-    state_path = Path(f'{state_root}/{run_qualifier}state.json')
-
-    if state_path.exists() or args.resume:
-        if args.resume:
-            ckpt_path = args.resume
-        if not args.resume:
-            state = json.load(open(state_path))
-            ckpt_path = f"{state_root}/{state['latest_checkpoint']}"
+    if loaded_state is not None:
+        ckpt_path = f"{state_root}/{loaded_state['latest_checkpoint']}"
         if accelerator.is_main_process:
             print(f'Resuming from {ckpt_path}...')
         ckpt = torch.load(ckpt_path, map_location='cpu')
-        ckpt_config = ckpt['config']
-        # merge in any new config defaults that have been introduced since the checkpoint was created
-        ckpt_config = K.config.load_config(ckpt_config)
-        register_load_hooks(unwrap(model_ema.inner_model), ckpt_config['model'], model_config)
-        unwrap(model_ema.inner_model).load_state_dict(ckpt['model_ema'])
         if do_train:
-            register_load_hooks(unwrap(model.inner_model), ckpt_config['model'], model_config)
-            unwrap(model.inner_model).load_state_dict(ckpt['model'])
-            if not should_discard_optim_state(unwrap(model.inner_model), ckpt_config['model'], model_config):
-                opt.load_state_dict(ckpt['opt'])
+            opt.load_state_dict(ckpt['opt'])
             sched.load_state_dict(ckpt['sched'])
             ema_sched.load_state_dict(ckpt['ema_sched'])
             ema_stats = ckpt.get('ema_stats', ema_stats)
@@ -505,21 +430,6 @@ def main():
                                       max_value=ema_sched_config['max_value'])
         ema_stats = {}
 
-    if args.resume_inference:
-        if accelerator.is_main_process:
-            print(f'Loading {args.resume_inference}...')
-        if guided_diff is None:
-            ckpt = safetorch.load_file(args.resume_inference)
-            if do_train:
-                unwrap(model.inner_model).load_state_dict(ckpt)
-            unwrap(model_ema.inner_model).load_state_dict(ckpt)
-            del ckpt
-        else:
-            from kdiff_trainer.load_diffusion_model import load_diffusion_model
-            if do_train:
-                load_diffusion_model(args.resume_inference, unwrap(model.inner_model))
-            load_diffusion_model(args.resume_inference, unwrap(model_ema.inner_model))
-
     evaluate_enabled = do_train and args.evaluate_every > 0 and args.evaluate_n > 0 or args.evaluate_only
     metrics_log = None
     if evaluate_enabled:
@@ -531,7 +441,7 @@ def main():
             extractor = K.evaluation.DINOv2FeatureExtractor(args.dinov2_model, device=device)
         else:
             raise ValueError('Invalid evaluation feature extractor')
-        train_iter = iter(train_dl)
+        train_reals_iter: Iterator[LatentImgPair] = iter(train_dl)
         if args.torchmetrics_fid:
             if accelerator.is_main_process:
                 from torchmetrics.image.fid import FrechetInceptionDistance
@@ -551,40 +461,19 @@ def main():
             observe_samples_fake: Optional[Callable[[FloatTensor], None]] = None
         if accelerator.is_main_process:
             print('Computing features for reals...')
-        if is_latent:
-            def sample_fn(cur_batch_size: int) -> FloatTensor:
-                samples = next(train_iter)
-                # we don't augment latents, because even flipped latents are pretty OOD (they look damaged when decoded).
-                # translations sort of work, but decoder only resolves convolution padding artifacts when they're at the canvas edge.
-                # basically if we want augmentations: we should do it in RGB before encoding (which is awkward if precomputing, or
-                # slow if done live).
-                latents: FloatTensor = samples[image_key]
-                # adapt from standard gaussian onto VAE's distribution
-                normalizer.inverse_(latents)
-                with torch.inference_mode():
-                    decoded: DecoderOutput = vae.decode(latents.to(vae.dtype))
-                del latents
-                rgb: FloatTensor = decoded.sample
-                # cast here to ensure we have same dtype as our fakes (which come out of the float32 ema_model).
-                # rgb datasets have float32 reals because they go through KarrasAugmentationPipeline, which returns a float32 tensor.
-                return rgb.float()
-        else:
-            def sample_fn(cur_batch_size: int) -> FloatTensor:
-                samples = next(train_iter)
-                augmented_imgs = samples[image_key]
-                # KarrasAugmentationPipeline maps images to 3-tuples:
-                # image, image_orig, aug_cond
-                _, image_orig, _ = augmented_imgs
-                return image_orig
+        def sample_fn(cur_batch_size: int) -> FloatTensor:
+            _, rgb = next(train_reals_iter)
+            # shift from [0., 1.] to [-1., 1.]
+            # cast here to ensure we have same dtype as our fakes (which come out of the float32 ema_model).
+            # rgb datasets have float32 reals because they go through KarrasAugmentationPipeline, which returns a float32 tensor.
+            return rgb.mul_(2).sub_(1).float()
         reals_features = K.evaluation.compute_features(accelerator, sample_fn, extractor, args.evaluate_n, args.batch_size, observe_samples=observe_samples_real)
         if accelerator.is_main_process and not args.evaluate_only:
             fid_cols: List[str] = ['fid']
             if args.torchmetrics_fid:
                 fid_cols.append('tfid')
             metrics_log = K.utils.CSVLogger(f'{metrics_root}/{run_qualifier}metrics.csv', ['step', 'time', 'loss', *fid_cols, 'kid'])
-        del train_iter
-
-    maybe_uncond_class: Literal[1, 0] = 1 if args.demo_classcond_include_uncond else 0
+        del train_reals_iter
     
     if args.sampler_preset == 'dpm3':
         def do_sample(model_fn: Callable, x: FloatTensor, sigmas: FloatTensor, extra_args: Dict[str, Any], disable: bool) -> FloatTensor:
@@ -595,21 +484,11 @@ def main():
     elif args.sampler_preset == 'ddpm':
         def do_sample(model_fn: Callable, x: FloatTensor, sigmas: FloatTensor, extra_args: Dict[str, Any], disable: bool) -> FloatTensor:
             return K.sampling.sample_euler_ancestral(model_fn, x, sigmas, extra_args=extra_args, eta=1.0, disable=disable)
+    elif args.sampler_preset == 'consistency':
+        def do_sample(model_fn: Callable, x: FloatTensor, sigmas: FloatTensor, extra_args: Dict[str, Any], disable: bool) -> FloatTensor:
+            return K.sampling.sample_consistency(model_fn, x, sigmas, extra_args=extra_args, disable=disable)
     else:
         raise ValueError(f"Unsupported sampler_preset: '{args.sampler_preset}'")
-
-    def make_cfg_model_fn(model):
-        def cfg_model_fn(x, sigma, class_cond):
-            x_in = torch.cat([x, x])
-            sigma_in = torch.cat([sigma, sigma])
-            class_uncond = torch.full_like(class_cond, num_classes)
-            class_cond_in = torch.cat([class_uncond, class_cond])
-            out = model(x_in, sigma_in, class_cond=class_cond_in)
-            out_uncond, out_cond = out.chunk(2)
-            return out_uncond + (out_cond - out_uncond) * args.cfg_scale
-        if args.cfg_scale != 1:
-            return cfg_model_fn
-        return model
     
     def generate_batch_of_samples() -> Samples:
         n_per_proc = math.ceil(args.sample_n / accelerator.num_processes)
@@ -617,42 +496,11 @@ def main():
         dist.broadcast(x, 0)
         x = x[accelerator.process_index] * sigma_max
         model_fn, extra_args = model_ema, {}
-        class_cond: Optional[LongTensor] = None
-        if uses_crossattn:
-            assert precomputed_conds is not None, "cross-attention is currently only implemented for precomputed conditions"
-            assert masked_uncond is not None, "expected that we would have assigned to masked_uncond either an all-zeros uncond, or an uncond generated by embedding an empty string"
-            cfg_args: CrossAttnCFGArgs = get_precomputed_cond_cfg_args(
-                accelerator=accelerator,
-                masked_conds=precomputed_conds.masked_conds,
-                uncond_class_ix=class_captions.uncond_class_ix,
-                use_allzeros_uncond=dataset_config['demo_uncond'] == 'allzeros',
-                n_per_proc=n_per_proc,
-                distribute=True,
-                include_uncond=args.demo_classcond_include_uncond,
-                rng=demo_gen,
-            )
-            class_cond = cfg_args.caption_ix
-            extra_args = {**extra_args, **cfg_args.sampling_extra_args}
-            model_fn = make_cfg_crossattn_model_fn(model_ema, masked_uncond=masked_uncond, cfg_scale=args.cfg_scale)
-        elif num_classes:
-            if args.goose_mode:
-                class_cond = torch.full([accelerator.num_processes, n_per_proc], fill_value=99, dtype=torch.int64).to(device)
-            else:
-                class_cond = torch.randint(0, num_classes + maybe_uncond_class, [accelerator.num_processes, n_per_proc], generator=demo_gen).to(device)
-            dist.broadcast(class_cond, 0)
-            # print ImageNet class labels like so:
-            # from kdiff_trainer.dataset_meta.imagenet_1k import class_labels
-            # print('\n'.join([' | '.join([class_labels[cell] for cell in row]) for row in class_cond[accelerator.process_index].unflatten(-1, sizes=(4,4)).tolist()]))
-            extra_args[class_cond_key] = class_cond[accelerator.process_index]
-            model_fn = make_cfg_model_fn(model_ema)
         sigmas = K.sampling.get_sigmas_karras(args.demo_steps, sigma_min, sigma_max, rho=7., device=device)
 
         x_0: FloatTensor = do_sample(model_fn, x, sigmas, extra_args=extra_args, disable=not accelerator.is_main_process)
         x_0 = accelerator.gather(x_0)[:args.sample_n]
-        if class_cond is None:
-            return Samples(x_0)
-        class_cond = class_cond.flatten(end_dim=1)[:args.sample_n]
-        return ClassConditionalSamples(x_0, class_cond)
+        return Samples(x_0)
     
     @torch.inference_mode() # note: inference_mode is lower-overhead than no_grad but disables forward-mode AD
     @K.utils.eval_mode(model_ema)
@@ -665,60 +513,25 @@ def main():
         while True:
             with tqdm_environ(TqdmOverrides(position=1)):
                 batch: Samples = generate_batch_of_samples()
-            if is_latent:
-                latents: FloatTensor = batch.x_0
-                # adapt from standard gaussian onto VAE's distribution
-                normalizer.inverse_(latents)
-                del batch.x_0
-                # VAE decoder outputs a FloatTensor with range approx ±1
-                decoded: DecoderOutput = vae.decode(latents.to(vae.dtype))
-                batch.x_0 = decoded.sample
-                del decoded, latents
             if accelerator.is_main_process:
                 pils: List[Image.Image] = to_pil_images(batch.x_0)
-                if isinstance(batch, ClassConditionalSamples):
-                    for pil, class_cond in zip(pils, batch.class_cond.unbind()):
-                        yield ClassConditionalSample(pil, class_cond.item())
-                else:
-                    for pil in pils:
-                        yield Sample(pil)
+                for pil in pils:
+                    yield Sample(pil)
             else:
                 yield from [None]*batch.x_0.shape[0]
 
     @torch.inference_mode() # note: inference_mode is lower-overhead than no_grad but disables forward-mode AD
     @K.utils.eval_mode(model_ema)
-    def demo(captioner: GridCaptioner):
+    def demo():
         if accelerator.is_main_process:
             tqdm.write('Sampling...')
         with FSDP.summon_full_params(model_ema):
             pass
 
         batch: Samples = generate_batch_of_samples()
-        if is_latent:
-            latents: FloatTensor = batch.x_0
-            # adapt from standard gaussian onto VAE's distribution
-            normalizer.inverse_(latents)
-            del batch.x_0
-            # VAE decoder outputs a FloatTensor with range approx ±1
-            decoded: DecoderOutput = vae.decode(latents.to(vae.dtype))
-            batch.x_0 = decoded.sample
-            del decoded, latents
         if accelerator.is_main_process:
-            if class_captions is not None:
-                assert isinstance(batch, ClassConditionalSamples)
-                pils: List[Image.Image] = to_pil_images(batch.x_0)
-                captions: List[str] = [class_captions.demo_class_captions[caption_ix_.item()] for caption_ix_ in batch.class_cond.flatten().cpu()]
-                title = f'[step {step}] {args.name} {args.config}'
-                if args.demo_title_qualifier:
-                    title += f' {args.demo_title_qualifier}'
-                grid_pil: Image.Image = captioner.__call__(
-                    imgs=pils,
-                    captions=captions,
-                    title=title,
-                )
-            else:
-                grid = utils.make_grid(batch.x_0, nrow=math.ceil(args.sample_n ** 0.5), padding=0)
-                grid_pil: Image.Image = K.utils.to_pil_image(grid)
+            grid = utils.make_grid(batch.x_0, nrow=math.ceil(args.sample_n ** 0.5), padding=0)
+            grid_pil: Image.Image = K.utils.to_pil_image(grid)
             save_kwargs = { 'subsampling': 0, 'quality': 95 } if args.demo_img_compress else {}
             fext = 'jpg' if args.demo_img_compress else 'png'
             filename = f'{demo_root}/{run_qualifier}{demo_file_qualifier}{step:08}.{fext}'
@@ -738,38 +551,11 @@ def main():
             pass
         sigmas = K.sampling.get_sigmas_karras(50, sigma_min, sigma_max, rho=7., device=device)
         def sample_fn(n: int) -> FloatTensor:
+            # TODO
             x = torch.randn([n, model_config['input_channels'], size[0], size[1]], device=device) * sigma_max
             model_fn, extra_args = model_ema, {}
-            if uses_crossattn:
-                assert precomputed_conds is not None, "cross-attention is currently only implemented for precomputed conditions"
-                assert masked_uncond is not None, "expected that we would have assigned to masked_uncond either an all-zeros uncond, or an uncond generated by embedding an empty string"
-                cfg_args: CrossAttnCFGArgs = get_precomputed_cond_cfg_args(
-                    accelerator=accelerator,
-                    masked_conds=precomputed_conds.masked_conds,
-                    uncond_class_ix=class_captions.uncond_class_ix,
-                    use_allzeros_uncond=dataset_config['demo_uncond'] == 'allzeros',
-                    n_per_proc=n,
-                    distribute=False,
-                    include_uncond=False,
-                    rng=None,
-                )
-                extra_args = {**extra_args, **cfg_args.sampling_extra_args}
-                model_fn = make_cfg_crossattn_model_fn(model_ema, masked_uncond=masked_uncond, cfg_scale=args.cfg_scale)
-            elif num_classes:
-                extra_args[class_cond_key] = torch.randint(0, num_classes, [n], device=device)
-                model_fn = make_cfg_model_fn(model_ema)
             x_0: FloatTensor = do_sample(model_fn, x, sigmas, extra_args=extra_args, disable=True)
             return x_0
-        if is_latent:
-            # wrap sample_fn
-            sample_latent = sample_fn
-            def sample_fn(n: int) -> FloatTensor:
-                latents: FloatTensor = sample_latent(n)
-                # adapt from standard gaussian onto VAE's distribution
-                normalizer.inverse_(latents)
-                with torch.inference_mode():
-                    decoded: DecoderOutput = vae.decode(latents.to(vae.dtype))
-                return decoded.sample.type_as(latents)
         fakes_features = K.evaluation.compute_features(accelerator, sample_fn, extractor, args.evaluate_n, args.batch_size, observe_samples=observe_samples_fake)
         if accelerator.is_main_process:
             fid = K.evaluation.fid(fakes_features, reals_features)
@@ -822,15 +608,6 @@ def main():
                 json.dump(state_obj, open(state_path, 'w'))
             if args.wandb_save_model and use_wandb:
                 wandb.save(filename)
-
-    # TODO: are h and w the right way around?
-    samp_h, samp_w = model_config['input_size']
-    sample_size = Dimensions(height=samp_h * maybe_vae_upsample, width=samp_w * maybe_vae_upsample)
-    captioner: GridCaptioner = make_default_grid_captioner(
-        font_path=args.font,
-        sample_n=args.sample_n,
-        sample_size=sample_size,
-    )
     
     if args.inference_only:
         if args.demo_classcond_include_uncond:
@@ -843,7 +620,7 @@ def main():
             # but the only current use-case for "inference more samples than we can fit in a batch" is for _making datasets_, which may as well be WDS.
             raise ValueError('--inference-n and --inference-out-wds-root must both be provided if either are provided.')
         if args.inference_n is None:
-            demo(captioner)
+            demo()
         else:
             samples = islice(generate_samples(), args.inference_n)
             if accelerator.is_main_process:
@@ -851,21 +628,12 @@ def main():
                 makedirs(args.inference_out_wds_root, exist_ok=True)
                 sink_ctx = ShardWriter(f'{args.inference_out_wds_root}/%05d.tar', maxcount=10000)
                 shard_qualifier: Optional[str] = '' if args.inference_out_wds_shard is None else f'{args.inference_out_wds_shard}/'
-                if num_classes:
-                    def sink_sample(sink: ShardWriter, ix: int, sample: ClassConditionalSample) -> None:
-                        out: ClassCondSinkOutput = {
-                            '__key__': f'{shard_qualifier}{ix}',
-                            'img.png': sample.pil,
-                            'cls.txt': str(sample.class_cond),
-                        }
-                        sink.write(out)
-                else:
-                    def sink_sample(sink: ShardWriter, ix: int, sample: Sample) -> None:
-                        out: SinkOutput = {
-                            '__key__': f'{shard_qualifier}{ix}',
-                            'img.png': sample.pil,
-                        }
-                        sink.write(out)
+                def sink_sample(sink: ShardWriter, ix: int, sample: Sample) -> None:
+                    out: SinkOutput = {
+                        '__key__': f'{shard_qualifier}{ix}',
+                        'img.png': sample.pil,
+                    }
+                    sink.write(out)
             else:
                 sink_ctx = nullcontext()
                 sink_sample: Callable[[Optional[ShardWriter], int, Sample], None] = lambda *_: ...
@@ -898,7 +666,8 @@ def main():
 
     try:
         while True:
-            for batch in tqdm(train_dl, smoothing=0.1, disable=not accelerator.is_main_process):
+            train_iter: Iterator[LatentImgPair] = iter(train_dl)
+            for batch in tqdm(train_iter, smoothing=0.1, disable=not accelerator.is_main_process):
                 if device.type == 'cuda':
                     start_timer = torch.cuda.Event(enable_timing=True)
                     end_timer = torch.cuda.Event(enable_timing=True)
@@ -908,43 +677,19 @@ def main():
                     start_timer = time.time()
 
                 with accelerator.accumulate(model):
-                    if is_latent:
-                        # we are using a dataset of precomputed latents, which means any augmenting would've had to have been done before it was encoded
-                        reals: FloatTensor = batch[image_key]
-                        prenorm_means: FloatTensor = reals.mean((0, -1, -2))
-                        prenorm_vars: FloatTensor = reals.var((0, -1, -2))
-                        sdscaled: FloatTensor = reals * vae.config.scaling_factor
-                        sdscaled_means: FloatTensor = sdscaled.mean((0, -1, -2))
-                        sdscaled_vars: FloatTensor = sdscaled.var((0, -1, -2))
-                        aug_cond = None
-                        # scale-and-shift from VAE distribution, to standard Gaussian
-                        normalizer.forward_(reals)
-                        normed_means: FloatTensor = reals.mean((0, -1, -2))
-                        normed_vars: FloatTensor = reals.var((0, -1, -2))
-                    else:
-                        reals, _, aug_cond = batch[image_key]
-                    class_cond, extra_args = None, {}
-                    if uses_crossattn:
-                        assert precomputed_conds is not None, "cross-attention is currently only implemented for precomputed conditions"
-                        xattn_extra_args: CrossAttnExtraArgs = get_precomputed_conds_by_ix(
-                            device=accelerator.device,
-                            text_uncond_ix=class_captions.uncond_class_ix,
-                            masked_conds=precomputed_conds.masked_conds,
-                            embed_ix=batch[class_key],
-                            cond_dropout_rate=cond_dropout_rate,
-                            allzeros_uncond_rate=dataset_config['allzeros_uncond_rate'],
-                        )
-                        extra_args = {**extra_args, **xattn_extra_args}
-                    elif num_classes:
-                        class_cond = batch[class_key]
-                        drop = torch.rand(class_cond.shape, device=class_cond.device)
-                        class_cond.masked_fill_(drop < cond_dropout_rate, num_classes)
-                        extra_args[class_cond_key] = class_cond
+                    # we are using a dataset of precomputed latents, which means any augmenting would've had to have been done before it was encoded
+                    latents, reals = batch
+                    # scale-and-shift from VAE distribution, to standard Gaussian
+                    normalizer.forward_(latents)
+                    # move from torchvision [0., 1.] to standard [-1., 1.]
+                    reals.mul_(2).sub_(1).detach()
+                    latents: FloatTensor = F.interpolate(latents, mode="nearest", scale_factor=8).detach()
+                    extra_args = {'latents': latents}
                     noise = torch.randn_like(reals)
                     with K.utils.enable_stratified_accelerate(accelerator, disable=args.gns):
                         sigma = sample_density([reals.shape[0]], device=device)
                     with K.models.checkpointing(args.checkpointing):
-                        losses = model.loss(reals, noise, sigma, aug_cond=aug_cond, **extra_args)
+                        losses = model.loss(reals, noise, sigma, **extra_args)
                     loss = accelerator.gather(losses).mean().item()
                     losses_since_last_print.append(loss)
                     accelerator.backward(losses.mean())
@@ -989,27 +734,12 @@ def main():
                     }
                     if args.gns:
                         log_dict['gradient_noise_scale'] = gns_stats.get_gns()
-                    if is_latent:
-                        for channel_ix, (prenorm_mean, prenorm_var, sdscaled_mean, sdscaled_var, normed_mean, normed_var) in enumerate(zip(
-                            prenorm_means.unbind(),
-                            prenorm_vars.unbind(),
-                            sdscaled_means.unbind(),
-                            sdscaled_vars.unbind(),
-                            normed_means.unbind(),
-                            normed_vars.unbind(),
-                        )):
-                            log_dict[f'latent_reals_prenorm/mean/{channel_ix}'] = prenorm_mean.item()
-                            log_dict[f'latent_reals_prenorm/var/{channel_ix}'] = prenorm_var.item()
-                            log_dict[f'latent_reals_sdscaled/mean/{channel_ix}'] = sdscaled_mean.item()
-                            log_dict[f'latent_reals_sdscaled/var/{channel_ix}'] = sdscaled_var.item()
-                            log_dict[f'latent_reals_normed/mean/{channel_ix}'] = normed_mean.item()
-                            log_dict[f'latent_reals_normed/var/{channel_ix}'] = normed_var.item()
                     wandb.log(log_dict, step=step)
 
                 step += 1
 
                 if step % args.demo_every == 0:
-                    demo(captioner)
+                    demo()
 
                 if evaluate_enabled and step > 0 and step % args.evaluate_every == 0:
                     evaluate()
