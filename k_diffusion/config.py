@@ -73,6 +73,7 @@ def load_config(path_or_dict: Union[str, Dict], use_json5=False):
             'up_proj_act': 'GEGLU',
             'pos_emb_type': 'ROPE',
             'ffn_up_bias': False,
+            'backbone_skip_type': 'learned_lerp',
         },
         'optimizer': {
             'type': 'adamw',
@@ -249,6 +250,7 @@ def make_model(config):
             pos_emb_type=config["pos_emb_type"],
             input_size=config['input_size'],
             ffn_up_bias=config['ffn_up_bias'],
+            backbone_skip_type=config['backbone_skip_type'],
         )
     elif config['type'] == 'dit':
         from .models.dit import DiT_models

@@ -1,0 +1,57 @@
+{
+  "model": {
+    "type": "image_transformer_v2",
+    "input_channels": 3,
+    "input_size": [128, 128],
+    "patch_size": [4, 4],
+    "mapping_width": 768,
+    "mapping_depth": 1,
+    "depths": [2, 11],
+    "widths": [384, 768],
+    "self_attns": [
+      {"type": "neighborhood", "kernel_size": 7, "d_head": 64},
+      {"type": "global", "d_head": 64}
+    ],
+    "loss_config": "karras",
+    "loss_weighting": "soft-min-snr",
+    "loss_scales": 1,
+    "dropout_rate": [0.0, 0.0],
+    "mapping_dropout_rate": 0.0,
+    "augment_prob": 0.0,
+    
+    "up_proj_act": "GEGLU",
+    "pos_emb_type": "ROPE",
+    
+    "sigma_data": 0.5,
+    "sigma_min": 1e-2,
+    "sigma_max": 160,
+    "sigma_sample_density": {
+      "type": "cosine-interpolated"
+    },
+
+    "backbone_skip_type": "concat"
+  },
+  "dataset": {
+    "type": "imagefolder-class",
+    "location": "/nvme1/ml-data/ImageNet/train",
+    "num_classes": 1000,
+    "classes_to_captions": "imagenet-1k",
+    "estimated_samples": 1281167,
+    "cond_dropout_rate": 0.1
+  },
+  "optimizer": {
+    "type": "adamw",
+    "lr": 5e-4,
+    "betas": [0.9, 0.95],
+    "eps": 1e-8,
+    "weight_decay": 1e-2
+  },
+  "lr_sched": {
+    "type": "constant"
+  },
+  "ema_sched": {
+    "type": "inverse",
+    "power": 0.75,
+    "max_value": 0.9999
+  }
+}
