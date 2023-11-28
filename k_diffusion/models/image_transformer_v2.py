@@ -727,17 +727,26 @@ class TokenSplitWithoutSkip(nn.Module):
 
 
 class TokenSplit(nn.Module):
-    def __init__(self, in_features, out_features, patch_size=(2, 2)):
+    def __init__(self, in_features, out_features, patch_size=(2, 2), skip_type: Literal['learned_lerp', 'add', 'concat'] = 'learned_lerp'):
         super().__init__()
         self.h = patch_size[0]
         self.w = patch_size[1]
         self.proj = apply_wd(Linear(in_features, out_features * self.h * self.w, bias=False))
-        self.fac = nn.Parameter(torch.ones(1) * 0.5)
+        self.skip_type = skip_type
+        if skip_type == 'learned_lerp':
+            self.fac = nn.Parameter(torch.ones(1) * 0.5)
+        elif skip_type == 'concat':
+            self.skip_proj = apply_wd(Linear(out_features * 2, out_features, bias=False))
 
     def forward(self, x, skip):
         x = self.proj(x)
         x = rearrange(x, "... h w (nh nw e) -> ... (h nh) (w nw) e", nh=self.h, nw=self.w)
-        return torch.lerp(skip, x, self.fac.to(x.dtype))
+        if self.skip_type == 'learned_lerp':
+            return torch.lerp(skip, x, self.fac.to(x.dtype))
+        if self.skip_type == 'concat':
+            return self.skip_proj(torch.cat([x, skip], dim=-1))
+        assert self.skip_type == 'add', f"Unexpected skip_type, '{self.skip_type}'"
+        return x + skip
 
 
 # Configuration
@@ -792,7 +801,7 @@ class MappingSpec:
 # Model class
 
 class ImageTransformerDenoiserModelV2(nn.Module):
-    def __init__(self, levels: Sequence[LevelSpec], mapping: MappingSpec, in_channels, out_channels, patch_size, num_classes=0, mapping_cond_dim=0, up_proj_act: Literal["GELU", "GEGLU"] = "GEGLU", pos_emb_type: Literal["ROPE", "additive"] = "ROPE", input_size: Optional[Union[int, Tuple[int, int]]] = None, ffn_up_bias=False):
+    def __init__(self, levels: Sequence[LevelSpec], mapping: MappingSpec, in_channels, out_channels, patch_size, num_classes=0, mapping_cond_dim=0, up_proj_act: Literal["GELU", "GEGLU"] = "GEGLU", pos_emb_type: Literal["ROPE", "additive"] = "ROPE", input_size: Optional[Union[int, Tuple[int, int]]] = None, ffn_up_bias=False, backbone_skip_type: Literal['learned_lerp', 'add', 'concat'] = 'learned_lerp'):
         super().__init__()
         self.num_classes = num_classes
 
@@ -854,7 +863,7 @@ class ImageTransformerDenoiserModelV2(nn.Module):
                 self.mid_level = Level([layer_factory(i) for i in range(spec.depth)])
 
         self.merges = nn.ModuleList([TokenMerge(spec_1.width, spec_2.width) for spec_1, spec_2 in zip(levels[:-1], levels[1:])])
-        self.splits = nn.ModuleList([TokenSplit(spec_2.width, spec_1.width) for spec_1, spec_2 in zip(levels[:-1], levels[1:])])
+        self.splits = nn.ModuleList([TokenSplit(spec_2.width, spec_1.width, skip_type=backbone_skip_type) for spec_1, spec_2 in zip(levels[:-1], levels[1:])])
 
         self.out_norm = RMSNorm(levels[0].width)
         self.patch_out = TokenSplitWithoutSkip(levels[0].width, out_channels, patch_size)
