@@ -5,7 +5,7 @@
     "input_size": [512, 512],
     "patch_size": [4, 4],
     "depths": [2, 2, 2, 2],
-    // 91m params
+    // 91M params, 168.768 GFLOPs
     "widths": [256, 512, 768, 1024],
     "self_attns": [
       {"type": "neighborhood", "d_head": 64},
