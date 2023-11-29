@@ -34,6 +34,7 @@ from contextlib import nullcontext
 from itertools import islice
 from tqdm import tqdm
 import numpy as np
+import gc
 
 import k_diffusion as K
 from kdiff_trainer.dimensions import Dimensions
@@ -682,8 +683,12 @@ def main():
                 else:
                     for pil in pils:
                         yield Sample(pil)
+                del pils
             else:
                 yield from [None]*batch.x_0.shape[0]
+            del batch # turns out not to be necessary, but this way we avoid having two batches in memory at the point of reassigning, maybe
+            gc.collect() # very important, which makes me question when the runtime was *planning* on collecting freed references otherwise
+            # torch.cuda.empty_cache() # turns out not to be necessary, but keep this in mind if I'm wrong about that
 
     @torch.inference_mode() # note: inference_mode is lower-overhead than no_grad but disables forward-mode AD
     @K.utils.eval_mode(model_ema)
@@ -869,6 +874,8 @@ def main():
             else:
                 sink_ctx = nullcontext()
                 sink_sample: Callable[[Optional[ShardWriter], int, Sample], None] = lambda *_: ...
+            # turns out there's a little bit of memory we can get back before we begin
+            torch.cuda.empty_cache()
             with sink_ctx as sink:
                 for batch_ix, batch in enumerate(tqdm(
                     # collating into batches just to get a more reliable progress report from tqdm
@@ -882,6 +889,8 @@ def main():
                     for ix, sample in enumerate(batch):
                         corpus_ix: int = args.sample_n*batch_ix + ix
                         sink_sample(sink, corpus_ix, sample)
+                    if accelerator.is_main_process:
+                        tqdm.write(f'batch {batch_ix} {torch.cuda.memory_allocated()/1024**2:.2f}MiB allocated, {torch.cuda.memory_reserved()/1024**2:.2f}MiB reserved of {torch.cuda.get_device_properties(0).total_memory/1024**2:.2f}MiB')
         if accelerator.is_main_process:
             tqdm.write('Finished inferencing!')
         return
