@@ -155,7 +155,8 @@ def sample_euler_ancestral(model, x, sigmas, extra_args=None, callback=None, dis
     return x
 
 
-@torch.no_grad()
+# actually we could want grads if we're gonna backprop through this during training
+# @torch.no_grad()
 def sample_consistency(model, x, sigmas, extra_args=None, callback=None, disable=None, noise_sampler=None):
     """Ancestral sampling with Euler method steps."""
     extra_args = {} if extra_args is None else extra_args

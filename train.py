@@ -20,7 +20,7 @@ from torch import distributed as dist
 from torch.distributed.fsdp.fully_sharded_data_parallel import FullyShardedDataParallel as FSDP
 from torch import multiprocessing as mp
 from torch import optim, FloatTensor
-from torch.nn import Module
+from torch.nn import Module, MSELoss
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import LRScheduler
 from torch.utils import data
@@ -678,7 +678,9 @@ def main():
             tqdm.write('Finished evaluating!')
         return
 
-    losses_since_last_print = []
+    loss_fn = MSELoss()
+
+    losses_since_last_print: List[float] = []
 
     try:
         while True:
@@ -702,13 +704,16 @@ def main():
                     latents: FloatTensor = F.interpolate(latents, mode="nearest", scale_factor=8).detach()
                     extra_args = {'latents': latents}
                     noise = torch.randn_like(reals)
-                    with K.utils.enable_stratified_accelerate(accelerator, disable=args.gns):
-                        sigma = sample_density([reals.shape[0]], device=device)
-                    with K.models.checkpointing(args.checkpointing):
-                        losses = model.loss(reals, noise, sigma, **extra_args)
-                    loss = accelerator.gather(losses).mean().item()
-                    losses_since_last_print.append(loss)
-                    accelerator.backward(losses.mean())
+                    # with K.utils.enable_stratified_accelerate(accelerator, disable=args.gns):
+                    #     sigma = sample_density([reals.shape[0]], device=device)
+                    # with K.models.checkpointing(args.checkpointing):
+                    #     losses = model.loss(reals, noise, sigma, **extra_args)
+                    sample: FloatTensor = K.sampling.sample_consistency(model, noise, consistency_sigmas, extra_args=extra_args)
+                    losses: FloatTensor = loss_fn(sample, reals)
+                    losses: FloatTensor = accelerator.gather(losses)
+                    loss: FloatTensor = losses.mean()
+                    losses_since_last_print.append(loss.item())
+                    accelerator.backward(loss)
                     if args.gns:
                         sq_norm_small_batch, sq_norm_large_batch = gns_stats_hook.get_stats()
                         gns_stats.update(sq_norm_small_batch, sq_norm_large_batch, reals.shape[0], reals.shape[0] * accelerator.num_processes)
