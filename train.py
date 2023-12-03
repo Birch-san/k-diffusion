@@ -19,7 +19,7 @@ import torch._dynamo
 from torch import distributed as dist
 from torch.distributed.fsdp.fully_sharded_data_parallel import FullyShardedDataParallel as FSDP
 from torch import multiprocessing as mp
-from torch import optim, FloatTensor
+from torch import optim, FloatTensor, Tensor
 from torch.nn import Module, MSELoss
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import LRScheduler
@@ -30,14 +30,14 @@ from tqdm.auto import tqdm
 from typing import Any, List, Optional, Union, Protocol, Literal, Iterator
 from PIL import Image
 from dataclasses import dataclass
-from typing import Optional, TypedDict, Generator, Callable, Dict, Any, Tuple
+from typing import Optional, TypedDict, OrderedDict, Generator, Callable, Dict, Any, Tuple
 from contextlib import nullcontext
 from itertools import islice
 from tqdm import tqdm
 import numpy as np
 from diffusers import ConsistencyDecoderVAE
 from diffusers.models.unet_2d_blocks import ResnetDownsampleBlock2D, ResnetUpsampleBlock2D
-from peft import LoraConfig, get_peft_model
+from peft import LoraConfig, PeftConfig, get_peft_model
 from peft.peft_model import PeftModel
 from lpips import LPIPS
 import gc
@@ -275,27 +275,41 @@ def main():
     state_path = Path(f'{state_root}/{run_qualifier}state.json')
     if state_path.exists():
         loaded_state: Dict = json.load(open(state_path))
-        lora_ckpts: Dict[Literal['model', 'model_ema'], str] = loaded_state['lora_ckpts']
+        ckpt = torch.load(f"{run_root}/{loaded_state['latest_checkpoint']}")
+        # lora_ckpts: Dict[Literal['model', 'model_ema'], str] = loaded_state['lora_ckpts']
+        lora_config_obj: LoraConfig = ckpt['config']
         if do_train:
-            inner_model = PeftModel.from_pretrained(cvae.decoder_unet, f"{state_root}/{lora_ckpts['model']}", adapter_name='model', is_trainable=True)
+            # TODO: use HF convention
+            # inner_model = PeftModel.from_pretrained(cvae.decoder_unet, f"{state_root}/{lora_ckpts['model']}", adapter_name='model', is_trainable=True)
+            inner_model = get_peft_model(cvae.decoder_unet, lora_config_obj, adapter_name='model')
+            model_state: OrderedDict[str, Tensor] = ckpt['model']
+            inner_model.load_state_dict({ k: v for k, v in model_state.items() if 'lora_A.model.weight' in k or 'lora_B.model.weight' in k }, strict=False)
+            del model_state
         else:
             inner_model = None
-        inner_model_ema = PeftModel.from_pretrained(cvae.decoder_unet, f"{state_root}/{lora_ckpts['model_ema']}", adapter_name='model_ema', is_trainable=False)
+        model_ema_state: OrderedDict[str, Tensor] = ckpt['model_ema']
+        del ckpt
+        # TODO: use HF convention
+        # inner_model_ema = PeftModel.from_pretrained(cvae.decoder_unet, f"{state_root}/{lora_ckpts['model_ema']}", adapter_name='model_ema', is_trainable=False)
+        inner_model_ema = get_peft_model(cvae.decoder_unet, lora_config_obj, adapter_name='model_ema')
+        inner_model_ema.load_state_dict({ k: v for k, v in model_ema_state.items() if 'lora_A.model_ema.weight' in k or 'lora_B.model_ema.weight' in k }, strict=False)
+        del model_ema_state
+        torch.cuda.empty_cache()
     else:
         assert do_train
         loaded_state: Optional[Dict] = None
         if accelerator.is_main_process:
             print(f'adding LoRA modules...')
         modules = find_all_conv_names(cvae.decoder_unet)
-        config = LoraConfig(
+        lora_config_obj = LoraConfig(
             r=lora_config['rank'],
             lora_alpha=lora_config['alpha'],
             target_modules=modules,
             lora_dropout=lora_config['dropout'],
             bias="none",
         )
-        inner_model = get_peft_model(cvae.decoder_unet, config, adapter_name='model')
-        inner_model_ema = get_peft_model(cvae.decoder_unet, config, adapter_name='model_ema')
+        inner_model = get_peft_model(cvae.decoder_unet, lora_config_obj, adapter_name='model')
+        inner_model_ema = get_peft_model(cvae.decoder_unet, lora_config_obj, adapter_name='model_ema')
 
     # If logging to wandb, initialize the run
     use_wandb = accelerator.is_main_process and args.wandb_project
@@ -448,6 +462,9 @@ def main():
             sched.load_state_dict(ckpt['sched'])
             ema_sched.load_state_dict(ckpt['ema_sched'])
             ema_stats = ckpt.get('ema_stats', ema_stats)
+            # I goofed in one of the checkpoints I saved
+            if 'loss' in ema_stats and ema_stats['loss'].requires_grad:
+                ema_stats['loss'].requires_grad_(False)
             epoch = ckpt['epoch'] + 1
             step = ckpt['step'] + 1
             if args.gns and ckpt.get('gns_stats', None) is not None:
@@ -774,7 +791,7 @@ def main():
                     opt.zero_grad()
 
                     ema_decay = ema_sched.get_value()
-                    K.utils.ema_update_dict(ema_stats, {'loss': loss}, ema_decay ** (1 / args.grad_accum_steps))
+                    K.utils.ema_update_dict(ema_stats, {'loss': loss.item()}, ema_decay ** (1 / args.grad_accum_steps))
                     if accelerator.sync_gradients:
                         K.utils.lora_ema_update(model.inner_model.base_model, model_ema.inner_model.base_model, ema_decay)
                         ema_sched.step()
