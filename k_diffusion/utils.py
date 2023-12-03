@@ -11,10 +11,10 @@ import warnings
 from PIL import Image
 import safetensors
 import torch
-from torch import nn, optim
+from torch import nn, optim, Tensor
 from torch.utils import data
 from torchvision.transforms import functional as TF
-from typing import Dict, Any, Callable, TypeAlias, Iterable, List
+from typing import Dict, Any, Callable, TypeAlias, Iterable, List, TYPE_CHECKING
 
 
 def from_pil_image(x):
@@ -111,6 +111,22 @@ def ema_update(model, averaged_model, decay):
 
     for name, buf in model_buffers.items():
         averaged_buffers[name].copy_(buf)
+
+if TYPE_CHECKING:
+    from peft.tuners.lora.model import LoraModel
+else:
+    LoraModel = Any
+
+@torch.no_grad()
+def lora_ema_update(model: LoraModel, averaged_model: LoraModel, decay: float):
+    """Incorporates updated model parameters into an exponential moving averaged
+    version of a model. It should be called after each optimizer step."""
+    model_params: Dict[str, Tensor] = { name: param for name, param in model.named_parameters() if 'lora_A' in name or 'lora_B' in name }
+    averaged_params: Dict[str, Tensor] = { name: param for name, param in averaged_model.named_parameters() if 'lora_A' in name or 'lora_B' in name }
+    assert model_params.keys() == averaged_params.keys()
+
+    for name, param in model_params.items():
+        averaged_params[name].lerp_(param, 1 - decay)
 
 
 class EMAWarmup:

@@ -30,7 +30,7 @@ from tqdm.auto import tqdm
 from typing import Any, List, Optional, Union, Protocol, Literal, Iterator
 from PIL import Image
 from dataclasses import dataclass
-from typing import Optional, TypedDict, Generator, Callable, Dict, Any
+from typing import Optional, TypedDict, Generator, Callable, Dict, Any, Tuple
 from contextlib import nullcontext
 from itertools import islice
 from tqdm import tqdm
@@ -42,7 +42,7 @@ from peft.peft_model import PeftModel
 from lpips import LPIPS
 
 import k_diffusion as K
-from kdiff_trainer.to_pil_images import to_pil_images
+from kdiff_trainer.to_pil_images import to_pil_images, to_pil_images_from_0_1
 from kdiff_trainer.tqdm_ctx import tqdm_environ, TqdmOverrides
 from kdiff_trainer.iteration.batched import batched
 from kdiff_trainer.dataset.get_latent_dataset import get_latent_dataset, LatentImgPair
@@ -58,11 +58,15 @@ SinkOutput = TypedDict('SinkOutput', {
 
 @dataclass
 class Samples:
+    # [-1., 1.] (standard Gaussian)
     x_0: FloatTensor
+    #  [0., 1.] (torchvision-style)
+    reals: FloatTensor
 
 @dataclass
 class Sample:
-    pil: Image.Image
+    pred: Image.Image
+    real: Image.Image
 
 class Sampler(Protocol):
     @staticmethod
@@ -197,7 +201,8 @@ def main():
     config = K.config.load_config(args.config, use_json5=args.config.endswith('.jsonc'))
     model_config = config['model']
     assert model_config['type'] == 'diff_dec'
-    dataset_config = config['dataset']
+    train_dataset_config = config['dataset']
+    test_dataset_config = config['dataset_test']
     if do_train:
         opt_config = config['optimizer']
         sched_config = config['lr_sched']
@@ -246,11 +251,13 @@ def main():
 
     cvae: ConsistencyDecoderVAE = ConsistencyDecoderVAE.from_pretrained(
         'openai/consistency-decoder',
-        variant='fp16',
-        torch_dtype=torch.float16,
+        # variant='fp16',
+        # torch_dtype=torch.float16,
         # device_map={'': f'{device.type}:{device.index or 0}'},
     ).train()
     del cvae.encoder, cvae.means, cvae.stds, cvae.decoder_scheduler
+    vae_scale_factor: int = 1 << (len(cvae.config.block_out_channels) - 1)
+    out_size: Tuple[int, int] = size[0]*vae_scale_factor, size[1]*vae_scale_factor
 
     if args.checkpointing:
         # one day they'll support this
@@ -351,18 +358,28 @@ def main():
         # for FSDP support: model must be prepared separately and before optimizers
         inner_model_ema = accelerator.prepare(inner_model_ema)
 
-    is_latent: bool = dataset_config.get('latents', False)
+    is_latent: bool = train_dataset_config.get('latents', False)
     assert is_latent
+    assert test_dataset_config.get('latents', False) == is_latent
 
     # we don't do resize & center-crop, because our latent datasets are precomputed
     # (via imagenet_vae_loading.py) for a given canvas size
-    train_set: Union[Dataset, IterableDataset] = get_latent_dataset(dataset_config)
-    channel_means: FloatTensor = torch.tensor(dataset_config['channel_means'])
-    channel_squares: FloatTensor = torch.tensor(dataset_config['channel_squares'])
-    channel_stds: FloatTensor = torch.sqrt(channel_squares - channel_means**2)
-    normalizer = Normalize(channel_means, channel_stds)
-    del channel_means, channel_squares, channel_stds
-    accelerator.prepare(normalizer)
+    train_set: Union[Dataset, IterableDataset] = get_latent_dataset(train_dataset_config)
+    test_set: Union[Dataset, IterableDataset] = get_latent_dataset(test_dataset_config)
+
+    train_channel_means: FloatTensor = torch.tensor(train_dataset_config['channel_means'])
+    train_channel_squares: FloatTensor = torch.tensor(train_dataset_config['channel_squares'])
+    train_channel_stds: FloatTensor = torch.sqrt(train_channel_squares - train_channel_means**2)
+    train_normalizer = Normalize(train_channel_means, train_channel_stds)
+    del train_channel_means, train_channel_squares, train_channel_stds
+
+    test_channel_means: FloatTensor = torch.tensor(test_dataset_config['channel_means'])
+    test_channel_squares: FloatTensor = torch.tensor(test_dataset_config['channel_squares'])
+    test_channel_stds: FloatTensor = torch.sqrt(test_channel_squares - test_channel_means**2)
+    test_normalizer = Normalize(test_channel_means, test_channel_stds)
+    del test_channel_means, test_channel_squares, test_channel_stds
+
+    accelerator.prepare(train_normalizer, test_normalizer)
 
     if accelerator.is_main_process:
         try:
@@ -370,17 +387,19 @@ def main():
         except TypeError:
             pass
 
-    image_key = dataset_config.get('image_key', 0)
-
     train_dl = data.DataLoader(train_set, args.batch_size, shuffle=not isinstance(train_set, data.IterableDataset), drop_last=True,
                                num_workers=args.num_workers, persistent_workers=True, pin_memory=True)
+    n_demo_samples_per_proc: int = math.ceil(args.sample_n / accelerator.num_processes)
+    test_dl = data.DataLoader(test_set, n_demo_samples_per_proc, shuffle=not isinstance(test_set, data.IterableDataset), drop_last=True,
+                               num_workers=args.num_workers, persistent_workers=True, pin_memory=True)
 
+    # TODO: work out whether there's situations where we wouldn't need both dataloaders
     if do_train:
-        opt, train_dl = accelerator.prepare(opt, train_dl)
+        opt, train_dl, test_dl = accelerator.prepare(opt, train_dl, test_dl)
         if use_wandb:
             wandb.watch(inner_model)
     else:
-        train_dl = accelerator.prepare(train_dl)
+        train_dl, test_dl = accelerator.prepare(train_dl, test_dl)
 
     if accelerator.num_processes == 1:
         args.gns = False
@@ -458,6 +477,7 @@ def main():
             extractor = K.evaluation.DINOv2FeatureExtractor(args.dinov2_model, device=device)
         else:
             raise ValueError('Invalid evaluation feature extractor')
+        # it seems to be common practice to eval against train set
         train_reals_iter: Iterator[LatentImgPair] = iter(train_dl)
         if args.torchmetrics_fid:
             if accelerator.is_main_process:
@@ -507,17 +527,30 @@ def main():
     else:
         raise ValueError(f"Unsupported sampler_preset: '{args.sampler_preset}'")
     
+    test_iter: Iterator[LatentImgPair] = iter(test_dl)
     def generate_batch_of_samples() -> Samples:
-        n_per_proc = math.ceil(args.sample_n / accelerator.num_processes)
-        x = torch.randn([accelerator.num_processes, n_per_proc, model_config['input_channels'], size[0], size[1]], generator=demo_gen).to(device)
+        batch: LatentImgPair = next(test_iter)
+        latents, reals = batch
+        assert latents.shape[0] == n_demo_samples_per_proc
+        assert reals.shape[0] == n_demo_samples_per_proc
+        # scale-and-shift from VAE distribution, to standard Gaussian
+        test_normalizer.forward_(latents)
+        latents: FloatTensor = F.interpolate(latents, mode="nearest", scale_factor=8).detach()
+        extra_args = {'latents': latents}
+        # don't move from torchvision [0., 1.] to standard [-1., 1.]. instead we have documented that it is torchvision format.
+        #   reals.mul_(2).sub_(1)
+        x = torch.randn([accelerator.num_processes, n_demo_samples_per_proc, 3, out_size[0], out_size[1]], generator=demo_gen).to(device)
         dist.broadcast(x, 0)
         x = x[accelerator.process_index] * sigma_max
         model_fn, extra_args = model_ema, {}
-        sigmas = K.sampling.get_sigmas_karras(args.demo_steps, sigma_min, sigma_max, rho=7., device=device)
+        # sigmas = K.sampling.get_sigmas_karras(args.demo_steps, sigma_min, sigma_max, rho=7., device=device)
 
-        x_0: FloatTensor = do_sample(model_fn, x, sigmas, extra_args=extra_args, disable=not accelerator.is_main_process)
+        with torch.inference_mode():
+            x_0: FloatTensor = K.sampling.sample_consistency(model_fn, x, consistency_sigmas, extra_args=extra_args, disable=not accelerator.is_main_process)
         x_0 = accelerator.gather(x_0)[:args.sample_n]
-        return Samples(x_0)
+        reals = accelerator.gather(reals)[:args.sample_n]
+
+        return Samples(x_0, reals)
     
     @torch.inference_mode() # note: inference_mode is lower-overhead than no_grad but disables forward-mode AD
     @K.utils.eval_mode(model_ema)
@@ -531,9 +564,10 @@ def main():
             with tqdm_environ(TqdmOverrides(position=1)):
                 batch: Samples = generate_batch_of_samples()
             if accelerator.is_main_process:
-                pils: List[Image.Image] = to_pil_images(batch.x_0)
-                for pil in pils:
-                    yield Sample(pil)
+                preds: List[Image.Image] = to_pil_images(batch.x_0)
+                reals: List[Image.Image] = to_pil_images_from_0_1(batch.reals)
+                for pred, real in zip(preds, reals):
+                    yield Sample(pred, real)
             else:
                 yield from [None]*batch.x_0.shape[0]
 
@@ -648,7 +682,8 @@ def main():
                 def sink_sample(sink: ShardWriter, ix: int, sample: Sample) -> None:
                     out: SinkOutput = {
                         '__key__': f'{shard_qualifier}{ix}',
-                        'img.png': sample.pil,
+                        'pred.png': sample.pred,
+                        'real.png': sample.real,
                     }
                     sink.write(out)
             else:
@@ -702,7 +737,7 @@ def main():
                     # we are using a dataset of precomputed latents, which means any augmenting would've had to have been done before it was encoded
                     latents, reals = batch
                     # scale-and-shift from VAE distribution, to standard Gaussian
-                    normalizer.forward_(latents)
+                    train_normalizer.forward_(latents)
                     # move from torchvision [0., 1.] to standard [-1., 1.]
                     reals.mul_(2).sub_(1).detach()
                     latents: FloatTensor = F.interpolate(latents, mode="nearest", scale_factor=8).detach()
@@ -735,7 +770,7 @@ def main():
                     ema_decay = ema_sched.get_value()
                     K.utils.ema_update_dict(ema_stats, {'loss': loss}, ema_decay ** (1 / args.grad_accum_steps))
                     if accelerator.sync_gradients:
-                        K.utils.ema_update(model, model_ema, ema_decay)
+                        K.utils.lora_ema_update(model.inner_model.base_model, model_ema.inner_model.base_model, ema_decay)
                         ema_sched.step()
 
                 if device.type == 'cuda':
