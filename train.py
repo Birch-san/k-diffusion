@@ -25,9 +25,8 @@ from torch.optim import Optimizer
 from torch.optim.lr_scheduler import LRScheduler
 from torch.utils import data
 from torch.utils.data.dataset import Dataset, IterableDataset
-from torchvision import utils
 from tqdm.auto import tqdm
-from typing import Any, List, Optional, Union, Protocol, Literal, Iterator
+from typing import Any, List, Optional, Union, Protocol, Iterator
 from PIL import Image
 from dataclasses import dataclass
 from typing import Optional, TypedDict, OrderedDict, Generator, Callable, Dict, Any, Tuple
@@ -37,8 +36,7 @@ from tqdm import tqdm
 import numpy as np
 from diffusers import ConsistencyDecoderVAE
 from diffusers.models.unet_2d_blocks import ResnetDownsampleBlock2D, ResnetUpsampleBlock2D
-from peft import LoraConfig, PeftConfig, get_peft_model
-from peft.peft_model import PeftModel
+from peft import LoraConfig, get_peft_model
 from lpips import LPIPS
 import gc
 
@@ -47,7 +45,6 @@ from kdiff_trainer.dimensions import Dimensions
 from kdiff_trainer.make_default_grid_captioner import make_default_grid_captioner
 from kdiff_trainer.make_captioned_grid import GridCaptioner
 from kdiff_trainer.to_pil_images import to_pil_images, to_pil_images_from_0_1
-from kdiff_trainer.tqdm_ctx import tqdm_environ, TqdmOverrides
 from kdiff_trainer.iteration.batched import batched
 from kdiff_trainer.dataset.get_latent_dataset import get_latent_dataset, LatentImgPair
 from kdiff_trainer.normalize import Normalize
@@ -566,7 +563,6 @@ def main():
             pass
 
         while True:
-            # with tqdm_environ(TqdmOverrides(position=1)):
             batch: Samples = generate_batch_of_samples()
             if accelerator.is_main_process:
                 preds: List[Image.Image] = to_pil_images(batch.x_0)
