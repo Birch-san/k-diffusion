@@ -254,16 +254,16 @@ def main():
         loaded_state: Dict = json.load(open(state_path))
         lora_ckpts: Dict[Literal['model', 'model_ema'], str] = loaded_state['lora_ckpts']
         if do_train:
-            inner_model = PeftModel.from_pretrained(cvae, f"{state_root}/{lora_ckpts['model']}", adapter_name='model', is_trainable=True)
+            inner_model = PeftModel.from_pretrained(cvae.decoder_unet, f"{state_root}/{lora_ckpts['model']}", adapter_name='model', is_trainable=True)
         else:
             inner_model = None
-        inner_model_ema = PeftModel.from_pretrained(cvae, f"{state_root}/{lora_ckpts['model_ema']}", adapter_name='model_ema', is_trainable=False)
+        inner_model_ema = PeftModel.from_pretrained(cvae.decoder_unet, f"{state_root}/{lora_ckpts['model_ema']}", adapter_name='model_ema', is_trainable=False)
     else:
         assert do_train
         loaded_state: Optional[Dict] = None
         if accelerator.is_main_process:
             print(f'adding LoRA modules...')
-        modules = find_all_conv_names(cvae)
+        modules = find_all_conv_names(cvae.decoder_unet)
         config = LoraConfig(
             r=lora_config['rank'],
             lora_alpha=lora_config['alpha'],
@@ -271,8 +271,8 @@ def main():
             lora_dropout=lora_config['dropout'],
             bias="none",
         )
-        inner_model = get_peft_model(cvae, config, adapter_name='model')
-        inner_model_ema = get_peft_model(cvae, config, adapter_name='model_ema')
+        inner_model = get_peft_model(cvae.decoder_unet, config, adapter_name='model')
+        inner_model_ema = get_peft_model(cvae.decoder_unet, config, adapter_name='model_ema')
 
     # If logging to wandb, initialize the run
     use_wandb = accelerator.is_main_process and args.wandb_project
