@@ -39,6 +39,7 @@ from diffusers import ConsistencyDecoderVAE
 from diffusers.models.unet_2d_blocks import ResnetDownsampleBlock2D, ResnetUpsampleBlock2D
 from peft import LoraConfig, get_peft_model
 from peft.peft_model import PeftModel
+from lpips import LPIPS
 
 import k_diffusion as K
 from kdiff_trainer.to_pil_images import to_pil_images
@@ -678,7 +679,10 @@ def main():
             tqdm.write('Finished evaluating!')
         return
 
-    loss_fn = MSELoss()
+    mse = MSELoss()
+    lpips = LPIPS(net='vgg').to(device)
+    mse_weight = 0.1
+    lpips_weight = 1-mse_weight
 
     losses_since_last_print: List[float] = []
 
@@ -709,8 +713,13 @@ def main():
                     # with K.models.checkpointing(args.checkpointing):
                     #     losses = model.loss(reals, noise, sigma, **extra_args)
                     sample: FloatTensor = K.sampling.sample_consistency(model, noise, consistency_sigmas, extra_args=extra_args)
-                    losses: FloatTensor = loss_fn(sample, reals)
-                    losses: FloatTensor = accelerator.gather(losses)
+                    mse_losses: FloatTensor = mse(sample, reals)
+                    lpips_losses: FloatTensor = lpips(sample, reals)
+                    mse_losses.mul_(mse_weight)
+                    lpips_losses.mul_(lpips_weight)
+                    lpips_losses.add_(mse_losses)
+                    losses: FloatTensor = accelerator.gather(lpips_losses)
+                    del mse_losses, lpips_losses
                     loss: FloatTensor = losses.mean()
                     losses_since_last_print.append(loss.item())
                     accelerator.backward(loss)

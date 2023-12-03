@@ -3,3 +3,4 @@ transformers
 json5
 webdataset
 torchmetrics[image]
+lpips
