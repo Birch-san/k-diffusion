@@ -54,6 +54,7 @@ from kdiff_trainer.normalize import Normalize
 
 from sdxl_diff_dec.schedule import betas_for_alpha_bar, alpha_bar, get_alphas
 from sdxl_diff_dec.sd_denoiser import SDDecoderDistilled
+from sdxl_diff_dec.prune_conv_out import prune_conv_out
 
 SinkOutput = TypedDict('SinkOutput', {
     '__key__': str,
@@ -258,6 +259,10 @@ def main():
         # device_map={'': f'{device.type}:{device.index or 0}'},
     ).train()
     del cvae.encoder, cvae.means, cvae.stds, cvae.decoder_scheduler
+
+    # prune away the unused channels
+    prune_conv_out(cvae.decoder_unet)
+
     vae_scale_factor: int = 1 << (len(cvae.config.block_out_channels) - 1)
     out_size: Tuple[int, int] = size[0]*vae_scale_factor, size[1]*vae_scale_factor
 
