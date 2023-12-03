@@ -14,11 +14,12 @@
         "--output-to-subdir",
         "--name", "sdxl_dec_demo_001",
         "--evaluate-n", "0",
-        "--batch-size", "32",
+        "--batch-size", "4",
         "--sample-n", "36",
         "--mixed-precision", "bf16",
         "--demo-img-compress",
         "--start-method", "fork",
+        "--checkpointing",
         // "--num-workers", "1",
       ],
       "env": {

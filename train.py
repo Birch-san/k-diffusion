@@ -20,6 +20,7 @@ from torch import distributed as dist
 from torch.distributed.fsdp.fully_sharded_data_parallel import FullyShardedDataParallel as FSDP
 from torch import multiprocessing as mp
 from torch import optim, FloatTensor
+from torch.nn import Module
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import LRScheduler
 from torch.utils import data
@@ -35,6 +36,7 @@ from itertools import islice
 from tqdm import tqdm
 import numpy as np
 from diffusers import ConsistencyDecoderVAE
+from diffusers.models.unet_2d_blocks import ResnetDownsampleBlock2D, ResnetUpsampleBlock2D
 from peft import LoraConfig, get_peft_model
 from peft.peft_model import PeftModel
 
@@ -246,8 +248,19 @@ def main():
         variant='fp16',
         torch_dtype=torch.float16,
         # device_map={'': f'{device.type}:{device.index or 0}'},
-    ).eval()
+    ).train()
     del cvae.encoder, cvae.means, cvae.stds, cvae.decoder_scheduler
+
+    if args.checkpointing:
+        # one day they'll support this
+        if cvae.decoder_unet._supports_gradient_checkpointing:
+            cvae.decoder_unet.enable_gradient_checkpointing()
+        else:
+            def enable_ckpt(module: Module) -> None:
+                match(module):
+                    case ResnetDownsampleBlock2D() | ResnetUpsampleBlock2D():
+                        module.gradient_checkpointing = True
+            cvae.decoder_unet.apply(enable_ckpt)
 
     state_path = Path(f'{state_root}/{run_qualifier}state.json')
     if state_path.exists():
