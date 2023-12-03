@@ -3,7 +3,7 @@ from diffusers import UNet2DModel
 from diffusers.models.unet_2d import UNet2DOutput
 from torch import FloatTensor, LongTensor, cat
 import torch
-from typing import Optional
+from typing import Optional, Literal
 
 from k_diffusion.sampling import append_zero
 
@@ -59,11 +59,15 @@ class SDDecoderDistilled(SDDecoder):
     self.rounded_sigmas = self.t_to_sigma(self.rounded_timesteps)
     self.rounded_log_sigmas = self.rounded_sigmas.log()
 
-  def get_sigmas_rounded(self, include_sigma_min=True, n: Optional[int] = None) -> FloatTensor:
+  def get_sigmas_rounded(self, include_sigma_min=True, t_max_exclusion: Literal['shift', 'bound'] = 'bound', n: Optional[int] = None) -> FloatTensor:
     if n is None:
       return append_zero(self.rounded_sigmas.flip(0))
-    t_max: int = len(self.rounded_sigmas) - 1
+    t_max: int = len(self.rounded_sigmas)
+    if t_max_exclusion == 'bound':
+      t_max -= 1
     t: FloatTensor = torch.linspace(t_max, 0, n, device=self.rounded_sigmas.device)
+    if t_max_exclusion == 'shift':
+      t.sub_(1).clamp_min_(0)
     if not include_sigma_min:
       t = t[:-1]
     return append_zero(self.t_to_sigma_rounded(t))

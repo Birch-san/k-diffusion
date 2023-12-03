@@ -413,6 +413,9 @@ def main():
     sigma_min: float = model_ema.sigma_min.item()
     sigma_max: float = model_ema.sigma_max.item()
 
+    sampling_steps = 2
+    consistency_sigmas: FloatTensor = model.get_sigmas_rounded(n=sampling_steps+1, include_sigma_min=False, t_max_exclusion='shift')
+
     if loaded_state is not None:
         ckpt_path = f"{state_root}/{loaded_state['latest_checkpoint']}"
         if accelerator.is_main_process:
