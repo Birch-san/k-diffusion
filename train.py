@@ -40,8 +40,12 @@ from diffusers.models.unet_2d_blocks import ResnetDownsampleBlock2D, ResnetUpsam
 from peft import LoraConfig, get_peft_model
 from peft.peft_model import PeftModel
 from lpips import LPIPS
+import gc
 
 import k_diffusion as K
+from kdiff_trainer.dimensions import Dimensions
+from kdiff_trainer.make_default_grid_captioner import make_default_grid_captioner
+from kdiff_trainer.make_captioned_grid import GridCaptioner
 from kdiff_trainer.to_pil_images import to_pil_images, to_pil_images_from_0_1
 from kdiff_trainer.tqdm_ctx import tqdm_environ, TqdmOverrides
 from kdiff_trainer.iteration.batched import batched
@@ -153,8 +157,6 @@ def main():
                    help='the number of steps to sample for demo grids')
     p.add_argument('--sample-n', type=int, default=64,
                    help='the number of images to sample for demo grids')
-    p.add_argument('--sampler-preset', type=str, default='consistency', choices=['dpm2', 'dpm3', 'ddpm', 'consistency'],
-                   help='whether to use the original DPM++(2M) SDE, sampler_type="heun" eta=0. config or to use DPM++(3M) SDE eta=1., which seems to get lower FID')
     p.add_argument('--save-every', type=int, default=10000,
                    help='save every this many steps')
     p.add_argument('--seed', type=int,
@@ -512,21 +514,6 @@ def main():
             metrics_log = K.utils.CSVLogger(f'{metrics_root}/{run_qualifier}metrics.csv', ['step', 'time', 'loss', *fid_cols, 'kid'])
         del train_reals_iter
     
-    if args.sampler_preset == 'dpm3':
-        def do_sample(model_fn: Callable, x: FloatTensor, sigmas: FloatTensor, extra_args: Dict[str, Any], disable: bool) -> FloatTensor:
-            return K.sampling.sample_dpmpp_3m_sde(model_fn, x, sigmas, extra_args=extra_args, eta=1.0, disable=disable)
-    elif args.sampler_preset == 'dpm2':
-        def do_sample(model_fn: Callable, x: FloatTensor, sigmas: FloatTensor, extra_args: Dict[str, Any], disable: bool) -> FloatTensor:
-            return K.sampling.sample_dpmpp_2m_sde(model_fn, x, sigmas, extra_args=extra_args, eta=0.0, solver_type='heun', disable=disable)
-    elif args.sampler_preset == 'ddpm':
-        def do_sample(model_fn: Callable, x: FloatTensor, sigmas: FloatTensor, extra_args: Dict[str, Any], disable: bool) -> FloatTensor:
-            return K.sampling.sample_euler_ancestral(model_fn, x, sigmas, extra_args=extra_args, eta=1.0, disable=disable)
-    elif args.sampler_preset == 'consistency':
-        def do_sample(model_fn: Callable, x: FloatTensor, sigmas: FloatTensor, extra_args: Dict[str, Any], disable: bool) -> FloatTensor:
-            return K.sampling.sample_consistency(model_fn, x, sigmas, extra_args=extra_args, disable=disable)
-    else:
-        raise ValueError(f"Unsupported sampler_preset: '{args.sampler_preset}'")
-    
     test_iter: Iterator[LatentImgPair] = iter(test_dl)
     def generate_batch_of_samples() -> Samples:
         batch: LatentImgPair = next(test_iter)
@@ -537,16 +524,12 @@ def main():
         test_normalizer.forward_(latents)
         latents: FloatTensor = F.interpolate(latents, mode="nearest", scale_factor=8).detach()
         extra_args = {'latents': latents}
-        # don't move from torchvision [0., 1.] to standard [-1., 1.]. instead we have documented that it is torchvision format.
-        #   reals.mul_(2).sub_(1)
         x = torch.randn([accelerator.num_processes, n_demo_samples_per_proc, 3, out_size[0], out_size[1]], generator=demo_gen).to(device)
         dist.broadcast(x, 0)
         x = x[accelerator.process_index] * sigma_max
-        model_fn, extra_args = model_ema, {}
-        # sigmas = K.sampling.get_sigmas_karras(args.demo_steps, sigma_min, sigma_max, rho=7., device=device)
 
         with torch.inference_mode():
-            x_0: FloatTensor = K.sampling.sample_consistency(model_fn, x, consistency_sigmas, extra_args=extra_args, disable=not accelerator.is_main_process)
+            x_0: FloatTensor = K.sampling.sample_consistency(model_ema, x, consistency_sigmas, extra_args=extra_args, disable=not accelerator.is_main_process)
         x_0 = accelerator.gather(x_0)[:args.sample_n]
         reals = accelerator.gather(reals)[:args.sample_n]
 
@@ -570,19 +553,32 @@ def main():
                     yield Sample(pred, real)
             else:
                 yield from [None]*batch.x_0.shape[0]
+            del batch # turns out not to be necessary, but this way we avoid having two batches in memory at the point of reassigning, maybe
+            gc.collect() # very important, which makes me question when the runtime was *planning* on collecting freed references otherwise
+            # torch.cuda.empty_cache() # turns out not to be necessary, but keep this in mind if I'm wrong about that
 
     @torch.inference_mode() # note: inference_mode is lower-overhead than no_grad but disables forward-mode AD
     @K.utils.eval_mode(model_ema)
-    def demo():
+    def demo(captioner: GridCaptioner):
         if accelerator.is_main_process:
             tqdm.write('Sampling...')
         with FSDP.summon_full_params(model_ema):
             pass
 
-        batch: Samples = generate_batch_of_samples()
+        sample_gen: Iterator[Optional[Sample]] = islice(generate_samples(), args.sample_n)
+        samples: List[Sample] = list(sample_gen)
+        del sample_gen
         if accelerator.is_main_process:
-            grid = utils.make_grid(batch.x_0, nrow=math.ceil(args.sample_n ** 0.5), padding=0)
-            grid_pil: Image.Image = K.utils.to_pil_image(grid)
+            captions: List[str] = [caption for ix in range(len(samples)) for caption in (f'real {ix}', f'pred {ix}')]
+            imgs: List[Image.Image] = [img for sample in samples for img in (sample.real, sample.pred)]
+            title = f'[step {step}] {args.name} {args.config}'
+            if args.demo_title_qualifier:
+                title += f' {args.demo_title_qualifier}'
+            grid_pil: Image.Image = captioner.__call__(
+                imgs=imgs,
+                captions=captions,
+                title=title,
+            )
             save_kwargs = { 'subsampling': 0, 'quality': 95 } if args.demo_img_compress else {}
             fext = 'jpg' if args.demo_img_compress else 'png'
             filename = f'{demo_root}/{run_qualifier}{demo_file_qualifier}{step:08}.{fext}'
@@ -660,6 +656,16 @@ def main():
             if args.wandb_save_model and use_wandb:
                 wandb.save(filename)
     
+    # TODO: are h and w the right way around?
+    samp_h, samp_w = out_size
+    sample_size = Dimensions(height=samp_h, width=samp_w)
+    captioner: GridCaptioner = make_default_grid_captioner(
+        font_path=args.font,
+        sample_n=args.sample_n,
+        sample_size=sample_size,
+        cols=(math.ceil(args.sample_n ** .5)//2)*2
+    )
+    
     if args.inference_only:
         if args.demo_classcond_include_uncond:
             if accelerator.is_main_process:
@@ -671,7 +677,7 @@ def main():
             # but the only current use-case for "inference more samples than we can fit in a batch" is for _making datasets_, which may as well be WDS.
             raise ValueError('--inference-n and --inference-out-wds-root must both be provided if either are provided.')
         if args.inference_n is None:
-            demo()
+            demo(captioner)
         else:
             samples = islice(generate_samples(), args.inference_n)
             if accelerator.is_main_process:
@@ -804,7 +810,7 @@ def main():
                 step += 1
 
                 if step % args.demo_every == 0:
-                    demo()
+                    demo(captioner)
 
                 if evaluate_enabled and step > 0 and step % args.evaluate_every == 0:
                     evaluate()
