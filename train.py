@@ -529,7 +529,7 @@ def main():
         x = x[accelerator.process_index] * sigma_max
 
         with torch.inference_mode():
-            x_0: FloatTensor = K.sampling.sample_consistency(model_ema, x, consistency_sigmas, extra_args=extra_args, disable=not accelerator.is_main_process)
+            x_0: FloatTensor = K.sampling.sample_consistency(model_ema, x, consistency_sigmas, extra_args=extra_args, disable=True)
         x_0 = accelerator.gather(x_0)[:args.sample_n]
         reals = accelerator.gather(reals)[:args.sample_n]
 
@@ -544,8 +544,8 @@ def main():
             pass
 
         while True:
-            with tqdm_environ(TqdmOverrides(position=1)):
-                batch: Samples = generate_batch_of_samples()
+            # with tqdm_environ(TqdmOverrides(position=1)):
+            batch: Samples = generate_batch_of_samples()
             if accelerator.is_main_process:
                 preds: List[Image.Image] = to_pil_images(batch.x_0)
                 reals: List[Image.Image] = to_pil_images_from_0_1(batch.reals)
@@ -753,7 +753,7 @@ def main():
                     #     sigma = sample_density([reals.shape[0]], device=device)
                     # with K.models.checkpointing(args.checkpointing):
                     #     losses = model.loss(reals, noise, sigma, **extra_args)
-                    sample: FloatTensor = K.sampling.sample_consistency(model, noise, consistency_sigmas, extra_args=extra_args)
+                    sample: FloatTensor = K.sampling.sample_consistency(model, noise, consistency_sigmas, extra_args=extra_args, disable=True)
                     mse_losses: FloatTensor = mse(sample, reals)
                     lpips_losses: FloatTensor = lpips(sample, reals)
                     mse_losses.mul_(mse_weight)
