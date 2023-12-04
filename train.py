@@ -19,7 +19,7 @@ import torch._dynamo
 from torch import distributed as dist
 from torch.distributed.fsdp.fully_sharded_data_parallel import FullyShardedDataParallel as FSDP
 from torch import multiprocessing as mp
-from torch import optim, FloatTensor
+from torch import optim, FloatTensor, Tensor
 from torch.nn import Module, MSELoss
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import LRScheduler
@@ -657,8 +657,10 @@ def main():
             inner_model_ema = unwrap(model_ema.inner_model)
 
             ckpt_step_dir = f'{ckpt_root}/{run_qualifier}{step:08}'
-            inner_model.save_pretrained(save_directory=ckpt_step_dir, safe_serialization=True, selected_adapters=['model'])
-            inner_model_ema.save_pretrained(save_directory=ckpt_step_dir, safe_serialization=True, selected_adapters=['model_ema'])
+            inner_model_lora_state: Dict[str, Tensor] = { name: param for name, param in inner_model.named_parameters() if re.search(K.utils.model_lora_param_match, name) }
+            inner_model_ema_lora_state: Dict[str, Tensor] = { name: param for name, param in inner_model_ema.named_parameters() if re.search(K.utils.model_ema_lora_param_match, name) }
+            inner_model.save_pretrained(save_directory=ckpt_step_dir, safe_serialization=True, selected_adapters=['model'], state_dict=inner_model_lora_state)
+            inner_model_ema.save_pretrained(save_directory=ckpt_step_dir, safe_serialization=True, selected_adapters=['model_ema'], state_dict=inner_model_ema_lora_state)
             obj = {
                 'config': config,
                 'lora_config': lora_config_obj,
