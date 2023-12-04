@@ -292,6 +292,10 @@ def main():
         else:
             inner_model = None
         inner_model_ema = PeftModel.from_pretrained(cvae.decoder_unet, f'{lora_ckpt_dir_qualified}/model_ema', adapter_name='model_ema', is_trainable=False)
+        # undo damage caused to base model by inner_model_ema's PeftModel#from_pretrained(is_trainable=False)
+        # (see peft::peft_model::load_adapter)
+        # we need it in train mode in order to use checkpointing.
+        inner_model.train()
         torch.cuda.empty_cache()
     else:
         assert do_train
