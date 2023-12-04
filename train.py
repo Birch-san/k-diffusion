@@ -442,14 +442,16 @@ def main():
             alphas_cumprod,
             total_timesteps=num_timesteps,
             n_distilled_steps=64,
-            dtype=torch.float32,
+            sampling_dtype=torch.float32,
+            model_dtype=unwrap(inner_model).dtype,
         )
     model_ema = SDDecoderDistilled(
         inner_model_ema,
         alphas_cumprod,
         total_timesteps=num_timesteps,
         n_distilled_steps=64,
-        dtype=torch.float32,
+        sampling_dtype=torch.float32,
+        model_dtype=unwrap(inner_model_ema).dtype,
     )
     sigma_min: float = model_ema.sigma_min.item()
     sigma_max: float = model_ema.sigma_max.item()
@@ -800,7 +802,7 @@ def main():
                     ema_decay = ema_sched.get_value()
                     K.utils.ema_update_dict(ema_stats, {'loss': loss.item()}, ema_decay ** (1 / args.grad_accum_steps))
                     if accelerator.sync_gradients:
-                        K.utils.lora_ema_update(model.inner_model.base_model, model_ema.inner_model.base_model, ema_decay)
+                        K.utils.lora_ema_update(unwrap(model.inner_model).base_model, unwrap(model_ema.inner_model).base_model, ema_decay)
                         ema_sched.step()
 
                 if device.type == 'cuda':

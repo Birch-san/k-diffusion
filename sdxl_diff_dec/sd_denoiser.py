@@ -11,19 +11,22 @@ class SDDecoder(DiscreteVDDPMDenoiser):
   inner_model: UNet2DModel
   timesteps: LongTensor
   sampling_dtype: torch.dtype
+  model_dtype: torch.dtype
   def __init__(
     self,
     unet: UNet2DModel,
     alphas_cumprod: FloatTensor,
     quantize=True,
-    dtype: torch.dtype = None,
+    sampling_dtype: Optional[torch.dtype] = None,
+    model_dtype: Optional[torch.dtype] = None,
   ):
     super().__init__(unet, alphas_cumprod, quantize=quantize)
     self.sigma_data = .5
-    self.sampling_dtype = unet.dtype if dtype is None else dtype
+    self.sampling_dtype = unet.dtype if sampling_dtype is None else sampling_dtype
+    self.model_dtype = self.inner_model.dtype if model_dtype is None else model_dtype
   
   def get_v(self, noised_rgb: FloatTensor, timestep: LongTensor, latents: FloatTensor) -> FloatTensor:
-    noise_and_latents: FloatTensor = cat([noised_rgb, latents], dim=1).to(self.inner_model.dtype)
+    noise_and_latents: FloatTensor = cat([noised_rgb, latents], dim=1).to(self.model_dtype)
     out: UNet2DOutput = self.inner_model.forward(
       noise_and_latents,
       timestep,
@@ -49,9 +52,10 @@ class SDDecoderDistilled(SDDecoder):
     total_timesteps=1024,
     n_distilled_steps=64,
     quantize=True,
-    dtype: torch.dtype = None,
+    sampling_dtype: Optional[torch.dtype] = None,
+    model_dtype: Optional[torch.dtype] = None,
   ):
-    super().__init__(unet, alphas_cumprod, quantize=quantize, dtype=dtype)
+    super().__init__(unet, alphas_cumprod, quantize=quantize, sampling_dtype=sampling_dtype, model_dtype=model_dtype)
 
     space: int = total_timesteps//n_distilled_steps
     self.timesteps = torch.arange(0, total_timesteps, device=unet.device)
