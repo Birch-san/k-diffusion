@@ -16,7 +16,7 @@
       "type": "cosine-interpolated"
     },
     "lora": {
-      "rank": 128,
+      "rank": 64,
       "alpha": 16,
       "dropout": 0.0
     }
