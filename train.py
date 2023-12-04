@@ -39,6 +39,8 @@ from diffusers.models.unet_2d_blocks import ResnetDownsampleBlock2D, ResnetUpsam
 from peft import LoraConfig, get_peft_model
 from lpips import LPIPS
 import gc
+from peft import PeftModel
+import re
 
 import k_diffusion as K
 from kdiff_trainer.dimensions import Dimensions
@@ -277,25 +279,18 @@ def main():
     state_path = Path(f'{state_root}/{run_qualifier}state.json')
     if state_path.exists():
         loaded_state: Dict = json.load(open(state_path))
-        ckpt = torch.load(f"{run_root}/{loaded_state['latest_checkpoint']}")
-        # lora_ckpts: Dict[Literal['model', 'model_ema'], str] = loaded_state['lora_ckpts']
-        lora_config_obj: LoraConfig = ckpt['config']
+        ckpt_path = f"{state_root}/{loaded_state['latest_checkpoint']}"
+        if accelerator.is_main_process:
+            print(f'Resuming LoRA from {ckpt_path}...')
+        ckpt = torch.load(ckpt_path, map_location='cpu')
+        lora_ckpt_dir: str = ckpt['lora_ckpt_dir']
+        lora_ckpt_dir_qualified: str = f'{state_root}/{lora_ckpt_dir}'
+        lora_config_obj: LoraConfig = ckpt['lora_config']
         if do_train:
-            # TODO: use HF convention
-            # inner_model = PeftModel.from_pretrained(cvae.decoder_unet, f"{state_root}/{lora_ckpts['model']}", adapter_name='model', is_trainable=True)
-            inner_model = get_peft_model(cvae.decoder_unet, lora_config_obj, adapter_name='model')
-            model_state: OrderedDict[str, Tensor] = ckpt['model']
-            inner_model.load_state_dict({ k: v for k, v in model_state.items() if 'lora_A.model.weight' in k or 'lora_B.model.weight' in k }, strict=False)
-            del model_state
+            inner_model = PeftModel.from_pretrained(cvae.decoder_unet, f'{lora_ckpt_dir_qualified}/model', adapter_name='model', is_trainable=True)
         else:
             inner_model = None
-        model_ema_state: OrderedDict[str, Tensor] = ckpt['model_ema']
-        del ckpt
-        # TODO: use HF convention
-        # inner_model_ema = PeftModel.from_pretrained(cvae.decoder_unet, f"{state_root}/{lora_ckpts['model_ema']}", adapter_name='model_ema', is_trainable=False)
-        inner_model_ema = get_peft_model(cvae.decoder_unet, lora_config_obj, adapter_name='model_ema')
-        inner_model_ema.load_state_dict({ k: v for k, v in model_ema_state.items() if 'lora_A.model_ema.weight' in k or 'lora_B.model_ema.weight' in k }, strict=False)
-        del model_ema_state
+        inner_model_ema = PeftModel.from_pretrained(cvae.decoder_unet, f'{lora_ckpt_dir_qualified}/model_ema', adapter_name='model_ema', is_trainable=False)
         torch.cuda.empty_cache()
     else:
         assert do_train
@@ -312,6 +307,10 @@ def main():
         )
         inner_model = get_peft_model(cvae.decoder_unet, lora_config_obj, adapter_name='model')
         inner_model_ema = get_peft_model(cvae.decoder_unet, lora_config_obj, adapter_name='model_ema')
+        for name, param in cvae.decoder_unet.named_parameters():
+            if re.search(K.utils.model_ema_lora_param_match, name):
+                param.requires_grad_(False)
+        ckpt = None
 
     # If logging to wandb, initialize the run
     use_wandb = accelerator.is_main_process and args.wandb_project
@@ -455,18 +454,15 @@ def main():
     consistency_sigmas: FloatTensor = model.get_sigmas_rounded(n=sampling_steps+1, include_sigma_min=False, t_max_exclusion='shift')
 
     if loaded_state is not None:
-        ckpt_path = f"{state_root}/{loaded_state['latest_checkpoint']}"
         if accelerator.is_main_process:
-            print(f'Resuming from {ckpt_path}...')
-        ckpt = torch.load(ckpt_path, map_location='cpu')
+            print(f'Resuming optimiser and schedules from {ckpt_path}...')
+        assert ckpt is not None
         if do_train:
             opt.load_state_dict(ckpt['opt'])
             sched.load_state_dict(ckpt['sched'])
             ema_sched.load_state_dict(ckpt['ema_sched'])
             ema_stats = ckpt.get('ema_stats', ema_stats)
             # I goofed in one of the checkpoints I saved
-            if 'loss' in ema_stats and ema_stats['loss'].requires_grad:
-                ema_stats['loss'].requires_grad_(False)
             epoch = ckpt['epoch'] + 1
             step = ckpt['step'] + 1
             if args.gns and ckpt.get('gns_stats', None) is not None:
@@ -653,10 +649,16 @@ def main():
         ):
             inner_model = unwrap(model.inner_model)
             inner_model_ema = unwrap(model_ema.inner_model)
+
+            ckpt_step_dir = f'{ckpt_root}/{run_qualifier}{step:08}'
+            inner_model.save_pretrained(save_directory=ckpt_step_dir, safe_serialization=True, selected_adapters=['model'])
+            inner_model_ema.save_pretrained(save_directory=ckpt_step_dir, safe_serialization=True, selected_adapters=['model_ema'])
             obj = {
                 'config': config,
-                'model': inner_model.state_dict(),
-                'model_ema': inner_model_ema.state_dict(),
+                'lora_config': lora_config_obj,
+                # 'model': inner_model.state_dict(),
+                # 'model_ema': inner_model_ema.state_dict(),
+                'lora_ckpt_dir': relpath(ckpt_step_dir, state_root),
                 'opt': opt.state_dict(),
                 'sched': sched.state_dict(),
                 'ema_sched': ema_sched.state_dict(),
