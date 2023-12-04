@@ -19,7 +19,7 @@ import torch._dynamo
 from torch import distributed as dist
 from torch.distributed.fsdp.fully_sharded_data_parallel import FullyShardedDataParallel as FSDP
 from torch import multiprocessing as mp
-from torch import optim, FloatTensor, Tensor
+from torch import optim, FloatTensor
 from torch.nn import Module, MSELoss
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import LRScheduler
@@ -29,7 +29,7 @@ from tqdm.auto import tqdm
 from typing import Any, List, Optional, Union, Protocol, Iterator
 from PIL import Image
 from dataclasses import dataclass
-from typing import Optional, TypedDict, OrderedDict, Generator, Callable, Dict, Any, Tuple
+from typing import Optional, TypedDict, Generator, Callable, Dict, Any, Tuple
 from contextlib import nullcontext
 from itertools import islice
 from tqdm import tqdm
@@ -190,6 +190,7 @@ def main():
 
     mp.set_start_method(args.start_method)
     torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
     try:
         torch._dynamo.config.automatic_dynamic_shapes = False
     except AttributeError:
@@ -311,6 +312,9 @@ def main():
             if re.search(K.utils.model_ema_lora_param_match, name):
                 param.requires_grad_(False)
         ckpt = None
+    if args.compile:
+        torch.compile(inner_model, fullgraph=True, mode='max-autotune')
+        torch.compile(inner_model_ema, fullgraph=True, mode='max-autotune')
 
     # If logging to wandb, initialize the run
     use_wandb = accelerator.is_main_process and args.wandb_project
