@@ -51,6 +51,7 @@ from kdiff_trainer.to_pil_images import to_pil_images, to_pil_images_from_0_1
 from kdiff_trainer.iteration.batched import batched
 from kdiff_trainer.dataset.get_latent_dataset import get_latent_dataset, LatentImgPair
 from kdiff_trainer.normalize import Normalize
+from kdiff_trainer.all_gather import all_gather
 
 from sdxl_diff_dec.schedule import betas_for_alpha_bar, alpha_bar, get_alphas
 from sdxl_diff_dec.sd_denoiser import SDDecoderDistilled
@@ -826,7 +827,7 @@ def main():
                     mse_losses.mul_(mse_weight)
                     lpips_losses.mul_(lpips_weight)
                     lpips_losses.add_(mse_losses)
-                    losses: FloatTensor = accelerator.gather(lpips_losses)
+                    losses: FloatTensor = all_gather(lpips_losses)
                     del mse_losses, lpips_losses
                     loss: FloatTensor = losses.mean()
                     losses_since_last_print.append(loss.item())
