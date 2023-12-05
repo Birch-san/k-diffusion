@@ -789,8 +789,8 @@ def main():
 
     mse = MSELoss()
     lpips = LPIPS(net='vgg').to(device)
-    mse_weight = 0.9
-    lpips_weight = 1-mse_weight
+    mse_weight = 1.
+    lpips_weight = .1
 
     losses_since_last_print: List[float] = []
 
