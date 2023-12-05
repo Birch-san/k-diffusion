@@ -41,6 +41,7 @@ from lpips import LPIPS
 import gc
 from peft import PeftModel
 import re
+from diffusers.models.unet_2d import UNet2DModel
 
 import k_diffusion as K
 from kdiff_trainer.dimensions import Dimensions
@@ -80,12 +81,15 @@ def ensure_distributed():
     if not dist.is_initialized():
         dist.init_process_group(world_size=1, rank=0, store=dist.HashStore())
 
-def find_all_conv_names(model: ConsistencyDecoderVAE) -> List[str]:
+def find_all_lorable_names(model: ConsistencyDecoderVAE, keep: Callable[[torch.nn.Conv2d|torch.nn.Linear], bool] = lambda _: True) -> List[str]:
     lora_module_names = set()
     for name, module in model.named_modules():
-        if isinstance(module, torch.nn.Conv2d):
-            names = name.split('.')
-            lora_module_names.add(names[0] if len(names) == 1 else names[-1])
+        match module:
+            case torch.nn.Conv2d() | torch.nn.Linear():
+                if not keep(module):
+                    continue
+                names = name.split('.')
+                lora_module_names.add(names[0] if len(names) == 1 else names[-1])
 
     return list(lora_module_names)
 
@@ -263,19 +267,27 @@ def main():
     # prune away the unused channels
     prune_conv_out(cvae.decoder_unet)
 
+    if do_train:
+        inner_model: UNet2DModel = cvae.decoder_unet
+        inner_model_ema: UNet2DModel = deepcopy(inner_model)
+    else:
+        inner_model = None
+        inner_model_ema: UNet2DModel = cvae.decoder_unet
+    del cvae.decoder_unet
+
     vae_scale_factor: int = 1 << (len(cvae.config.block_out_channels) - 1)
     out_size: Tuple[int, int] = size[0]*vae_scale_factor, size[1]*vae_scale_factor
 
-    if args.checkpointing:
+    if do_train and args.checkpointing:
         # one day they'll support this
-        if cvae.decoder_unet._supports_gradient_checkpointing:
-            cvae.decoder_unet.enable_gradient_checkpointing()
+        if inner_model._supports_gradient_checkpointing:
+            inner_model.enable_gradient_checkpointing()
         else:
             def enable_ckpt(module: Module) -> None:
                 match(module):
                     case ResnetDownsampleBlock2D() | ResnetUpsampleBlock2D():
                         module.gradient_checkpointing = True
-            cvae.decoder_unet.apply(enable_ckpt)
+            inner_model.apply(enable_ckpt)
 
     state_path = Path(f'{state_root}/{run_qualifier}state.json')
     if state_path.exists():
@@ -284,40 +296,56 @@ def main():
         if accelerator.is_main_process:
             print(f'Resuming LoRA from {ckpt_path}...')
         ckpt = torch.load(ckpt_path, map_location='cpu')
+        model_partial_state: Dict[str, Tensor] = ckpt['model']
+        model_ema_partial_state: Dict[str, Tensor] = ckpt['model_ema']
+        for n, p in inner_model.named_parameters():
+            if n.endswith('bias') or '.norm' in n or n == 'conv_in.weight':
+                qualified_name = f'base_model.model.{n}'
+                assert qualified_name in model_partial_state
+                p.data.copy_(model_partial_state[qualified_name].data)
+        for n, p in inner_model_ema.named_parameters():
+            if n.endswith('bias') or '.norm' in n or n == 'conv_in.weight':
+                qualified_name = f'base_model.model.{n}'
+                assert qualified_name in model_ema_partial_state
+                p.data.copy_(model_ema_partial_state[qualified_name].data)
         lora_ckpt_dir: str = ckpt['lora_ckpt_dir']
         lora_ckpt_dir_qualified: str = f'{state_root}/{lora_ckpt_dir}'
         lora_config_obj: LoraConfig = ckpt['lora_config']
         if do_train:
-            inner_model = PeftModel.from_pretrained(cvae.decoder_unet, f'{lora_ckpt_dir_qualified}/model', adapter_name='model', is_trainable=True)
+            inner_model = PeftModel.from_pretrained(inner_model, f'{lora_ckpt_dir_qualified}/model', adapter_name='model', is_trainable=True)
         else:
             inner_model = None
-        inner_model_ema = PeftModel.from_pretrained(cvae.decoder_unet, f'{lora_ckpt_dir_qualified}/model_ema', adapter_name='model_ema', is_trainable=False)
-        # undo damage caused to base model by inner_model_ema's PeftModel#from_pretrained(is_trainable=False)
-        # (see peft::peft_model::load_adapter)
-        # we need it in train mode in order to use checkpointing.
-        inner_model.train()
+        inner_model_ema = PeftModel.from_pretrained(inner_model_ema, f'{lora_ckpt_dir_qualified}/model_ema', adapter_name='model_ema', is_trainable=False)
         torch.cuda.empty_cache()
     else:
         assert do_train
         loaded_state: Optional[Dict] = None
         if accelerator.is_main_process:
             print(f'adding LoRA modules...')
-        modules = find_all_conv_names(cvae.decoder_unet)
+        # adapt every Linear and Conv2d, *except* conv_in, which we full-finetune
+        modules = find_all_lorable_names(inner_model, keep=lambda mod: mod is not inner_model.conv_in)
         lora_config_obj = LoraConfig(
             r=lora_config['rank'],
             lora_alpha=lora_config['alpha'],
             target_modules=modules,
             lora_dropout=lora_config['dropout'],
+            # I'm a bit confused about how they implemented biases, so I'll just full-finetune any existing biases instead
             bias="none",
         )
-        inner_model = get_peft_model(cvae.decoder_unet, lora_config_obj, adapter_name='model')
-        inner_model_ema = get_peft_model(cvae.decoder_unet, lora_config_obj, adapter_name='model_ema')
-        for name, param in cvae.decoder_unet.named_parameters():
-            if re.search(K.utils.model_ema_lora_param_match, name):
-                param.requires_grad_(False)
+        inner_model = get_peft_model(inner_model, lora_config_obj, adapter_name='model')
+        inner_model_ema = get_peft_model(inner_model_ema, lora_config_obj, adapter_name='model_ema')
         ckpt = None
+
+    if do_train:
+        # full-finetune every norm and bias
+        inner_model.conv_in.weight.requires_grad_(True)
+        for n, p in inner_model.named_parameters():
+            if (n.endswith('bias') or '.norm' in n) and not re.search(K.utils.model_lora_param_match, n):
+                p.requires_grad_(True)
+    
     if args.compile:
-        torch.compile(inner_model, fullgraph=True, mode='max-autotune')
+        if do_train:
+            torch.compile(inner_model, fullgraph=True, mode='max-autotune')
         torch.compile(inner_model_ema, fullgraph=True, mode='max-autotune')
 
     # If logging to wandb, initialize the run
@@ -331,7 +359,8 @@ def main():
     if do_train:
         lr = opt_config['lr'] if args.lr is None else args.lr
         groups = [
-            {"params": [p for p in inner_model.parameters() if p.requires_grad], "lr": lr}
+            {"params": [p for n, p in inner_model.named_parameters() if p.requires_grad and n.endswith('bias')], "lr": lr, "weight_decay": 0.},
+            {"params": [p for n, p in inner_model.named_parameters() if p.requires_grad and not n.endswith('bias')], "lr": lr},
         ]
         # for FSDP support: models must be prepared separately and before optimizers
         inner_model, inner_model_ema = accelerator.prepare(inner_model, inner_model_ema)
@@ -664,12 +693,17 @@ def main():
             inner_model_lora_state: Dict[str, Tensor] = { name: param for name, param in inner_model.named_parameters() if re.search(K.utils.model_lora_param_match, name) }
             inner_model_ema_lora_state: Dict[str, Tensor] = { name: param for name, param in inner_model_ema.named_parameters() if re.search(K.utils.model_ema_lora_param_match, name) }
             inner_model.save_pretrained(save_directory=ckpt_step_dir, safe_serialization=True, selected_adapters=['model'], state_dict=inner_model_lora_state)
+            del inner_model_lora_state
             inner_model_ema.save_pretrained(save_directory=ckpt_step_dir, safe_serialization=True, selected_adapters=['model_ema'], state_dict=inner_model_ema_lora_state)
+            del inner_model_ema_lora_state
+            model_partial: Dict[str, Tensor] = { name: param for name, param in inner_model.named_parameters() if param.requires_grad and not re.search(K.utils.model_lora_param_match, name) }
+            model_ema_state: Dict[str, Tensor] = { name: param for name, param in inner_model_ema.named_parameters() }
+            model_ema_partial: Dict[str, Tensor] = { name: model_ema_state[name] for name in model_partial.keys() }
             obj = {
                 'config': config,
                 'lora_config': lora_config_obj,
-                # 'model': inner_model.state_dict(),
-                # 'model_ema': inner_model_ema.state_dict(),
+                'model': model_partial,
+                'model_ema': model_ema_partial,
                 'lora_ckpt_dir': relpath(ckpt_step_dir, state_root),
                 'opt': opt.state_dict(),
                 'sched': sched.state_dict(),
@@ -681,6 +715,7 @@ def main():
                 'demo_gen': demo_gen.get_state(),
                 'elapsed': elapsed,
             }
+            del model_partial, model_ema_state, model_ema_partial
             accelerator.save(obj, filename)
             if accelerator.is_main_process:
                 state_obj = {'latest_checkpoint': relpath(filename, state_root)}
@@ -809,6 +844,7 @@ def main():
                     K.utils.ema_update_dict(ema_stats, {'loss': loss.item()}, ema_decay ** (1 / args.grad_accum_steps))
                     if accelerator.sync_gradients:
                         K.utils.lora_ema_update(unwrap(model.inner_model).base_model, unwrap(model_ema.inner_model).base_model, ema_decay)
+                        K.utils.partial_ema_update(unwrap(model.inner_model).base_model, unwrap(model_ema.inner_model).base_model, ema_decay)
                         ema_sched.step()
 
                 if device.type == 'cuda':

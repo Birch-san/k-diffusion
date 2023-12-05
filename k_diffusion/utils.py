@@ -132,6 +132,16 @@ def lora_ema_update(model: LoraModel, averaged_model: LoraModel, decay: float):
         assert avg_name.replace('.model_ema.', '.model.') == name
         avg_param.lerp_(param, 1 - decay)
 
+@torch.no_grad()
+def partial_ema_update(model: nn.Module, averaged_model: nn.Module, decay: float):
+    model_params: Dict[str, Tensor] = { name: param for name, param in model.named_parameters() if param.requires_grad and not re.search(model_lora_param_match, name) }
+    averaged_params: Dict[str, Tensor] = { name: param for name, param in averaged_model.named_parameters() }
+
+    for name, param in model_params.items():
+        assert name in averaged_params
+        avg_param: Tensor = averaged_params[name]
+        avg_param.lerp_(param, 1 - decay)
+
 
 class EMAWarmup:
     """Implements an EMA warmup using an inverse decay schedule.
