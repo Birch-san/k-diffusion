@@ -405,6 +405,8 @@ def main():
                                         warmup=sched_config['warmup'])
         elif sched_config['type'] == 'constant':
             sched = K.utils.ConstantLRWithWarmup(opt, warmup=sched_config['warmup'])
+        elif sched_config['type'] == 'none':
+            sched = None
         else:
             raise ValueError('Invalid schedule type')
 
@@ -505,7 +507,10 @@ def main():
         assert ckpt is not None
         if do_train:
             opt.load_state_dict(ckpt['opt'])
-            sched.load_state_dict(ckpt['sched'])
+            if sched is None:
+                assert ckpt['sched'] is None
+            else:
+                sched.load_state_dict(ckpt['sched'])
             ema_sched.load_state_dict(ckpt['ema_sched'])
             ema_stats = ckpt.get('ema_stats', ema_stats)
             # I goofed in one of the checkpoints I saved
@@ -720,7 +725,7 @@ def main():
                 'model_ema': model_ema_partial,
                 'lora_ckpt_dir': relpath(ckpt_step_dir, state_root),
                 'opt': opt.state_dict(),
-                'sched': sched.state_dict(),
+                'sched': None if sched is None else sched.state_dict(),
                 'ema_sched': ema_sched.state_dict(),
                 'epoch': epoch,
                 'step': step,
@@ -851,7 +856,8 @@ def main():
                     if accelerator.sync_gradients:
                         accelerator.clip_grad_norm_(model.parameters(), 1.)
                     opt.step()
-                    sched.step()
+                    if sched is not None:
+                        sched.step()
                     opt.zero_grad()
 
                     ema_decay = ema_sched.get_value()
@@ -882,9 +888,13 @@ def main():
                     log_dict = {
                         'epoch': epoch,
                         'loss': loss,
-                        'lr': sched.get_last_lr()[0],
                         'ema_decay': ema_decay,
                     }
+                    if sched is None:
+                        for group_ix, param_group in enumerate(opt.param_groups):
+                            log_dict[f'lr.{group_ix}'] = param_group['lr']
+                    else:
+                        log_dict['lr'] = sched.get_last_lr()[0]
                     if args.gns:
                         log_dict['gradient_noise_scale'] = gns_stats.get_gns()
                     wandb.log(log_dict, step=step)
