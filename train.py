@@ -13,6 +13,7 @@ from os import makedirs
 from os.path import relpath
 
 import accelerate
+from accelerate.utils import KwargsHandler, DistributedDataParallelKwargs
 import torch
 import torch.nn.functional as F
 import torch._dynamo
@@ -223,7 +224,12 @@ def main():
     assert len(model_config['input_size']) == 2 and model_config['input_size'][0] == model_config['input_size'][1]
     size = model_config['input_size']
 
-    accelerator = accelerate.Accelerator(gradient_accumulation_steps=args.grad_accum_steps, mixed_precision=args.mixed_precision)
+    # https://lightning.ai/docs/pytorch/stable/advanced/ddp_optimizations.html
+    kwargs_handlers: List[KwargsHandler] = [DistributedDataParallelKwargs(
+        gradient_as_bucket_view=True,
+        static_graph=True,
+    )]
+    accelerator = accelerate.Accelerator(gradient_accumulation_steps=args.grad_accum_steps, mixed_precision=args.mixed_precision, kwargs_handlers=kwargs_handlers)
     ensure_distributed()
     device = accelerator.device
     unwrap = accelerator.unwrap_model
