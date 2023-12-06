@@ -30,7 +30,7 @@ from tqdm.auto import tqdm
 from typing import Any, List, Optional, Union, Protocol, Iterator
 from PIL import Image
 from dataclasses import dataclass
-from typing import Optional, TypedDict, Generator, Callable, Dict, Any, Tuple
+from typing import Optional, TypedDict, Generator, Callable, Dict, Any, Tuple, OrderedDict
 from contextlib import nullcontext
 from itertools import islice
 from tqdm import tqdm
@@ -524,7 +524,14 @@ def main():
     if args.reset_ema:
         if not do_train:
             raise ValueError("Training is disabled (this can happen as a result of options such as --evaluate-only). Accordingly we did not construct a trainable model, and consequently cannot load the EMA model's weights onto said trainable model. Disable --reset-ema, or enable training.")
-        unwrap(model.inner_model).load_state_dict(unwrap(model_ema.inner_model).state_dict())
+        ema_state: OrderedDict[str, Tensor] = unwrap(model_ema.inner_model).state_dict()
+        mapped_ema_state: Dict[str, Tensor] = {}
+        for name, param in ema_state.items():
+            mapped_name: str = name.replace('.model_ema.', '.model.') if re.search(K.utils.model_ema_lora_param_match, name) else name
+            mapped_ema_state[mapped_name] = param
+        del ema_state
+        unwrap(model.inner_model).load_state_dict(mapped_ema_state)
+        del mapped_ema_state
         ema_sched = K.utils.EMAWarmup(power=ema_sched_config['power'],
                                       max_value=ema_sched_config['max_value'])
         ema_stats = {}
