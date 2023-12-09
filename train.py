@@ -21,7 +21,7 @@ from torch import distributed as dist
 from torch.distributed.fsdp.fully_sharded_data_parallel import FullyShardedDataParallel as FSDP
 from torch import multiprocessing as mp
 from torch import optim, FloatTensor, Tensor
-from torch.nn import Module, MSELoss
+from torch.nn import Module, MSELoss, L1Loss
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import LRScheduler
 from torch.utils import data
