@@ -512,7 +512,8 @@ def main():
             if sched is None:
                 assert ckpt['sched'] is None
             else:
-                sched.load_state_dict(ckpt['sched'])
+                if ckpt['sched'] is not None:
+                    sched.load_state_dict(ckpt['sched'])
             ema_sched.load_state_dict(ckpt['ema_sched'])
             ema_stats = ckpt.get('ema_stats', ema_stats)
             # I goofed in one of the checkpoints I saved
