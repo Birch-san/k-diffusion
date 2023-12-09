@@ -319,6 +319,7 @@ def main():
                 qualified_name = f'base_model.model.{n}'
                 assert qualified_name in model_ema_partial_state
                 p.data.copy_(model_ema_partial_state[qualified_name].data)
+        del model_partial_state, model_ema_partial_state
         lora_ckpt_dir: str = ckpt['lora_ckpt_dir']
         lora_ckpt_dir_qualified: str = f'{state_root}/{lora_ckpt_dir}'
         lora_config_obj: LoraConfig = ckpt['lora_config']
