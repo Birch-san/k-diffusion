@@ -163,6 +163,8 @@ def main():
                    help='the number of steps to sample for demo grids')
     p.add_argument('--sample-n', type=int, default=64,
                    help='the number of images to sample for demo grids')
+    p.add_argument('--sampler-preset', type=str, default='dpm3', choices=['dpm2', 'dpm3', 'ddpm'],
+                   help='whether to use the original DPM++(2M) SDE, sampler_type="heun" eta=0. config or to use DPM++(3M) SDE eta=1., which seems to get lower FID')
     p.add_argument('--save-every', type=int, default=10000,
                    help='save every this many steps')
     p.add_argument('--seed', type=int,
@@ -192,6 +194,8 @@ def main():
                    help='save model to wandb')
     p.add_argument('--enable-vae-slicing', action='store_true',
                    help='limit VAE decode (demo, eval) to batch-of-1 to save memory')
+    p.add_argument('--backprop-through-sampler', action='store_true',
+                   help='try to preserve consistency objective by backpropping through sampler')
     args = p.parse_args()
 
     mp.set_start_method(args.start_method)
@@ -480,7 +484,8 @@ def main():
     alphas_cumprod: FloatTensor = alphas.cumprod(dim=0)
 
     if do_train:
-        sample_density = partial(K.utils.rand_uniform, min_value=0, max_value=num_timesteps-1)
+        # sample_density = partial(K.utils.rand_uniform, min_value=0, max_value=num_timesteps-1)
+        sample_density = K.config.make_sample_density(model_config)
         model = SDDecoderDistilled(
             inner_model,
             alphas_cumprod,
@@ -497,11 +502,20 @@ def main():
         sampling_dtype=torch.float32,
         model_dtype=unwrap(inner_model_ema).dtype,
     )
-    sigma_min: float = model_ema.sigma_min.item()
-    sigma_max: float = model_ema.sigma_max.item()
+    # the non-distilled schedule has a sigma_max that is far out of distribution compared to the distilled schedule
+    # sigma_min: float = model_ema.sigma_min.item()
+    # sigma_max: float = model_ema.sigma_max.item()
+    # distilled schedule
+    sigma_min: float = model.uniq_sigmas[0].item()
+    sigma_max: float = model.uniq_sigmas[-1].item()
 
-    sampling_steps = 2
-    consistency_sigmas: FloatTensor = model.get_sigmas_rounded(n=sampling_steps+1, include_sigma_min=False, t_max_exclusion='shift')
+    if args.backprop_through_sampler:
+        sampling_steps = 2
+        sigmas: FloatTensor = model.get_sigmas_rounded(n=sampling_steps+1, include_sigma_min=False, t_max_exclusion='shift')
+    else:
+        # sigmas: FloatTensor = K.sampling.get_sigmas_karras(args.demo_steps, sigma_min, sigma_max, rho=7., device=device)
+        sigmas: FloatTensor = model.get_sigmas_rounded(n=args.demo_steps, include_sigma_min=True, t_max_exclusion='bound').unique_consecutive()
+        # sigmas: FloatTensor = K.sampling.append_zero(model.uniq_sigmas.flip(0))
 
     if loaded_state is not None:
         if accelerator.is_main_process:
@@ -590,6 +604,22 @@ def main():
             metrics_log = K.utils.CSVLogger(f'{metrics_root}/{run_qualifier}metrics.csv', ['step', 'time', 'loss', *fid_cols, 'kid'])
         del train_reals_iter
     
+    if args.backprop_through_sampler:
+        @torch.inference_mode()
+        def do_sample(model_fn: Callable, x: FloatTensor, sigmas: FloatTensor, extra_args: Dict[str, Any], _: bool) -> FloatTensor:
+            return K.sampling.sample_consistency(model_fn, x, sigmas, extra_args=extra_args, disable=True)
+    elif args.sampler_preset == 'dpm3':
+        def do_sample(model_fn: Callable, x: FloatTensor, sigmas: FloatTensor, extra_args: Dict[str, Any], disable: bool) -> FloatTensor:
+            return K.sampling.sample_dpmpp_3m_sde(model_fn, x, sigmas, extra_args=extra_args, eta=1.0, disable=disable)
+    elif args.sampler_preset == 'dpm2':
+        def do_sample(model_fn: Callable, x: FloatTensor, sigmas: FloatTensor, extra_args: Dict[str, Any], disable: bool) -> FloatTensor:
+            return K.sampling.sample_dpmpp_2m_sde(model_fn, x, sigmas, extra_args=extra_args, eta=0.0, solver_type='heun', disable=disable)
+    elif args.sampler_preset == 'ddpm':
+        def do_sample(model_fn: Callable, x: FloatTensor, sigmas: FloatTensor, extra_args: Dict[str, Any], disable: bool) -> FloatTensor:
+            return K.sampling.sample_euler_ancestral(model_fn, x, sigmas, extra_args=extra_args, eta=1.0, disable=disable)
+    else:
+        raise ValueError(f"Unsupported sampler_preset: '{args.sampler_preset}'")
+    
     test_iter: Iterator[LatentImgPair] = iter(test_dl)
     def generate_batch_of_samples() -> Samples:
         batch: LatentImgPair = next(test_iter)
@@ -603,9 +633,7 @@ def main():
         x = torch.randn([accelerator.num_processes, n_demo_samples_per_proc, 3, out_size[0], out_size[1]], generator=demo_gen).to(device)
         dist.broadcast(x, 0)
         x = x[accelerator.process_index] * sigma_max
-
-        with torch.inference_mode():
-            x_0: FloatTensor = K.sampling.sample_consistency(model_ema, x, consistency_sigmas, extra_args=extra_args, disable=True)
+        x_0: FloatTensor = do_sample(model_ema, x, sigmas, extra_args=extra_args, disable=not accelerator.is_main_process)
         x_0 = accelerator.gather(x_0)[:args.sample_n]
         reals = accelerator.gather(reals)[:args.sample_n]
 
@@ -809,14 +837,16 @@ def main():
             tqdm.write('Finished evaluating!')
         return
 
-    mse = MSELoss(reduction='none')
-    l1 = L1Loss(reduction='none')
-    mse_weight = 1.
-    l1_weight = .05
-    lpips_weight = .05
+    if args.backprop_through_sampler:
+        e2e_loss: Dict[str, float] = config.get('e2e_loss', {})
+        mse = MSELoss(reduction='none')
+        l1 = L1Loss(reduction='none')
+        mse_weight: float = e2e_loss.get('mse', 1.)
+        l1_weight: float = e2e_loss.get('l1', 0.)
+        lpips_weight: float = e2e_loss.get('lpips', .1)
 
-    if lpips_weight != 0.:
-        lpips = LPIPS(net='vgg').to(device)
+        if lpips_weight != 0.:
+            lpips = LPIPS(net='vgg').to(device)
 
     losses_since_last_print: List[float] = []
 
@@ -842,27 +872,30 @@ def main():
                     latents: FloatTensor = F.interpolate(latents, mode="nearest", scale_factor=8).detach()
                     extra_args = {'latents': latents}
                     noise = torch.randn_like(reals)
-                    # with K.utils.enable_stratified_accelerate(accelerator, disable=args.gns):
-                    #     sigma = sample_density([reals.shape[0]], device=device)
-                    # with K.models.checkpointing(args.checkpointing):
-                    #     losses = model.loss(reals, noise, sigma, **extra_args)
-                    sample: FloatTensor = K.sampling.sample_consistency(model, noise, consistency_sigmas, extra_args=extra_args, disable=True)
-                    losses: FloatTensor = mse(sample, reals)
-                    if mse_weight != 1.:
-                        losses.mul_(mse_weight)
-                    if l1_weight != 0.:
-                        l1_losses: FloatTensor = l1(sample, reals)
-                        if l1_weight != 1.:
-                            l1_losses.mul_(l1_weight)
-                        losses.add_(l1_losses)
-                        del l1_losses
-                    if lpips_weight != 0.:
-                        lpips_losses: FloatTensor = lpips(sample, reals)
-                        if lpips_weight != 1.:
-                            lpips_losses.mul_(lpips_weight)
-                        losses.add_(lpips_losses)
-                        del lpips_losses
-                    losses: FloatTensor = all_gather(losses)
+                    if args.backprop_through_sampler:
+                        sample: FloatTensor = K.sampling.sample_consistency(model, noise, sigmas, extra_args=extra_args, disable=True)
+                        losses: FloatTensor = mse(sample, reals)
+                        if mse_weight != 1.:
+                            losses.mul_(mse_weight)
+                        if l1_weight != 0.:
+                            l1_losses: FloatTensor = l1(sample, reals)
+                            if l1_weight != 1.:
+                                l1_losses.mul_(l1_weight)
+                            losses.add_(l1_losses)
+                            del l1_losses
+                        if lpips_weight != 0.:
+                            lpips_losses: FloatTensor = lpips(sample, reals)
+                            if lpips_weight != 1.:
+                                lpips_losses.mul_(lpips_weight)
+                            losses.add_(lpips_losses)
+                            del lpips_losses
+                        losses: FloatTensor = all_gather(losses)
+                    else:
+                        with K.utils.enable_stratified_accelerate(accelerator, disable=args.gns):
+                            sigma = sample_density([reals.shape[0]], device=device)
+                        # this checkpointing is probably a no-op for the diffusion decoder, since it doesn't use k-diffusion's checkpointing conventions
+                        with K.models.checkpointing(args.checkpointing):
+                            losses: FloatTensor = model.loss(reals, noise, sigma, **extra_args)
                     loss: FloatTensor = losses.mean()
                     del losses
                     losses_since_last_print.append(loss.item())

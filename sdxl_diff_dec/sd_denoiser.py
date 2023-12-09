@@ -42,6 +42,8 @@ class SDDecoder(DiscreteVDDPMDenoiser):
     return nominal.clamp(-1, 1)
 
 class SDDecoderDistilled(SDDecoder):
+  uniq_timesteps: LongTensor
+  uniq_sigmas: LongTensor
   rounded_timesteps: LongTensor
   rounded_sigmas: FloatTensor
   rounded_log_sigmas: FloatTensor
@@ -62,6 +64,8 @@ class SDDecoderDistilled(SDDecoder):
     self.rounded_timesteps = ((self.timesteps//space)+1).clamp_max(n_distilled_steps-1)*space
     self.rounded_sigmas = self.t_to_sigma(self.rounded_timesteps)
     self.rounded_log_sigmas = self.rounded_sigmas.log()
+    self.uniq_timesteps = torch.arange(space, total_timesteps, step=space, device=unet.device)
+    self.uniq_sigmas = self.t_to_sigma(self.uniq_timesteps)
 
   def get_sigmas_rounded(self, include_sigma_min=True, t_max_exclusion: Literal['shift', 'bound'] = 'bound', n: Optional[int] = None) -> FloatTensor:
     if n is None:
