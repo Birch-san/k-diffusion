@@ -344,6 +344,8 @@ def main():
         ckpt = None
 
     if do_train:
+        if not state_path.exists():
+            inner_model.conv_in.reset_parameters()
         # full-finetune every norm and bias
         inner_model.conv_in.weight.requires_grad_(True)
         for n, p in inner_model.named_parameters():
