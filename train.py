@@ -808,10 +808,14 @@ def main():
             tqdm.write('Finished evaluating!')
         return
 
-    mse = MSELoss()
-    lpips = LPIPS(net='vgg').to(device)
+    mse = MSELoss(reduction='none')
+    l1 = L1Loss(reduction='none')
     mse_weight = 1.
-    lpips_weight = .1
+    l1_weight = .05
+    lpips_weight = .05
+
+    if lpips_weight != 0.:
+        lpips = LPIPS(net='vgg').to(device)
 
     losses_since_last_print: List[float] = []
 
@@ -842,14 +846,24 @@ def main():
                     # with K.models.checkpointing(args.checkpointing):
                     #     losses = model.loss(reals, noise, sigma, **extra_args)
                     sample: FloatTensor = K.sampling.sample_consistency(model, noise, consistency_sigmas, extra_args=extra_args, disable=True)
-                    mse_losses: FloatTensor = mse(sample, reals)
-                    lpips_losses: FloatTensor = lpips(sample, reals)
-                    mse_losses.mul_(mse_weight)
-                    lpips_losses.mul_(lpips_weight)
-                    lpips_losses.add_(mse_losses)
-                    losses: FloatTensor = all_gather(lpips_losses)
-                    del mse_losses, lpips_losses
+                    losses: FloatTensor = mse(sample, reals)
+                    if mse_weight != 1.:
+                        losses.mul_(mse_weight)
+                    if l1_weight != 0.:
+                        l1_losses: FloatTensor = l1(sample, reals)
+                        if l1_weight != 1.:
+                            l1_losses.mul_(l1_weight)
+                        losses.add_(l1_losses)
+                        del l1_losses
+                    if lpips_weight != 0.:
+                        lpips_losses: FloatTensor = lpips(sample, reals)
+                        if lpips_weight != 1.:
+                            lpips_losses.mul_(lpips_weight)
+                        losses.add_(lpips_losses)
+                        del lpips_losses
+                    losses: FloatTensor = all_gather(losses)
                     loss: FloatTensor = losses.mean()
+                    del losses
                     losses_since_last_print.append(loss.item())
                     accelerator.backward(loss)
                     if args.gns:
