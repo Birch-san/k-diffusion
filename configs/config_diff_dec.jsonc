@@ -9,8 +9,10 @@
     "loss_scales": 1,
     "augment_prob": 0.0,
     "sigma_data": 0.5,
-    "sigma_min": 0.0,
-    "sigma_max": 20778.279296875,
+    // "sigma_min": 0.0, // non-distilled schedule
+    // "sigma_max": 20778.279296875, // non-distilled schedule
+    "sigma_min": 0.03627193719148636, //  distilled schedule
+    "sigma_max": 43.79655075073242, //  distilled schedule
     "num_timesteps": 1024,
     "sigma_sample_density": {
       "type": "cosine-interpolated"
@@ -58,18 +60,27 @@
   "optimizer": {
     "type": "adamw",
     // "type": "adam8bit",
-    "lr": 5e-4,
+    // "lr": 5e-4,
+    "lr": 1e-4,
+    // "lr": 5e-5,
+    // "lr": 1e-5,
     "betas": [0.9, 0.95],
     "eps": 1e-8,
     "weight_decay": 1e-2
   },
   "lr_sched": {
-    // "type": "constant"
-    "type": "none"
+    "type": "constant"
+    // "type": "none"
   },
   "ema_sched": {
     "type": "inverse",
     "power": 0.75,
     "max_value": 0.9999
+  },
+  // only used in --backprop-through-sampler mode
+  "e2e_loss": {
+    "mse": 1.0,
+    "l1": 0.05,
+    "lpips": 0.05
   }
 }
