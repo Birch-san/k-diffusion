@@ -217,6 +217,8 @@ def main():
 
     if args.input_size_override is not None:
         assert model_config['type'] == 'image_transformer_v2'
+        assert model_config['input_size'][0] == model_config['input_size'][1], "implemented for squares only"
+        orig_input_size: int = model_config['input_size'][0]
         model_config['input_size'][0] = args.input_size_override
         model_config['input_size'][1] = args.input_size_override
         if args.grow_levels_for_input_size:
@@ -225,7 +227,7 @@ def main():
             shallowest_ff: int = model_config['d_ffs'][0]
             shallowest_self_attn = model_config['self_attns'][0]
             # duplicate shallowest level of the model for every power-of-2 larger the overriden input_size is compared to the originally-specified config
-            extra_levels = int(math.log2(args.input_size_override)-math.log2(model_config['input_size'][0]))
+            extra_levels = int(math.log2(args.input_size_override)-math.log2(orig_input_size))
             for _ in range(extra_levels):
                 model_config['widths'].insert(0, shallowest_width)
                 model_config['depths'].insert(0, shallowest_depth)
