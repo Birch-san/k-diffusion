@@ -194,6 +194,10 @@ def main():
                    help='save model to wandb')
     p.add_argument('--enable-vae-slicing', action='store_true',
                    help='limit VAE decode (demo, eval) to batch-of-1 to save memory')
+    p.add_argument('--input-size-override', type=int, default=None,
+                   help="specify a different input size, overriding what's specified in the model's config. intended only as a convenient way of measuring how the model's FLOPs scale with input size.")
+    p.add_argument('--grow-levels-for-input-size', action='store_true',
+                   help="[when --input-size-override is specified] for each power-of-2 by which the 'override' input size exceeds the config-specified input size, grow the model by duplicating its shallowest level. intended only as a convenient way of measuring how the model's FLOPs *and parameter count* scale with input size, under a 'duplicate shallowest level' scheme for growing the model. for image_transformer_v2 models only.")
     args = p.parse_args()
 
     mp.set_start_method(args.start_method)
@@ -210,6 +214,25 @@ def main():
     # use json5 parser if we wish to load .jsonc (commented) config
     config = K.config.load_config(args.config, use_json5=args.config.endswith('.jsonc'))
     model_config = config['model']
+
+    if args.input_size_override is not None:
+        assert model_config['type'] == 'image_transformer_v2'
+        model_config['input_size'][0] = args.input_size_override
+        model_config['input_size'][1] = args.input_size_override
+        if args.grow_levels_for_input_size:
+            shallowest_width: int = model_config['widths'][0]
+            shallowest_depth: int = model_config['depths'][0]
+            shallowest_ff: int = model_config['d_ffs'][0]
+            shallowest_self_attn = model_config['self_attns'][0]
+            # duplicate shallowest level of the model for every power-of-2 larger the overriden input_size is compared to the originally-specified config
+            extra_levels = int(math.log2(args.input_size_override)-math.log2(model_config['input_size'][0]))
+            for _ in range(extra_levels):
+                model_config['widths'].insert(0, shallowest_width)
+                model_config['depths'].insert(0, shallowest_depth)
+                model_config['d_ffs'].insert(0, shallowest_ff)
+                model_config['self_attns'].insert(0, deepcopy(shallowest_self_attn))
+                model_config['dropout_rate'].insert(0, 0.0)
+
     dataset_config = config['dataset']
     if do_train:
         opt_config = config['optimizer']
