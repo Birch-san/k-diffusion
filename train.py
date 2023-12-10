@@ -17,6 +17,7 @@ import safetensors.torch as safetorch
 import torch
 import torch._dynamo
 from torch import distributed as dist
+from torch.nn import MSELoss
 from torch.distributed.fsdp.fully_sharded_data_parallel import FullyShardedDataParallel as FSDP
 from torch import multiprocessing as mp
 from torch import optim, FloatTensor, LongTensor
@@ -523,6 +524,9 @@ def main():
         epoch = 0
         step = 0
 
+    if do_train and model_config['loss_weighting'] == 'min-snr':
+        mse_loss_fn = MSELoss()
+
     if args.reset_ema:
         if not do_train:
             raise ValueError("Training is disabled (this can happen as a result of options such as --evaluate-only). Accordingly we did not construct a trainable model, and consequently cannot load the EMA model's weights onto said trainable model. Disable --reset-ema, or enable training.")
@@ -978,7 +982,15 @@ def main():
                     with K.utils.enable_stratified_accelerate(accelerator, disable=args.gns):
                         sigma = sample_density([reals.shape[0]], device=device)
                     with K.models.checkpointing(args.checkpointing):
-                        losses = model.loss(reals, noise, sigma, aug_cond=aug_cond, **extra_args)
+                        if model_config['loss_weighting'] == 'min-snr':
+                            with torch.no_grad():
+                                noised_reals: FloatTensor = (reals + noise * K.utils.append_dims(sigma, reals.ndim)).detach()
+                                snr_weightings: FloatTensor = model._weighting_snr(sigma).detach()
+                            denoiseds: FloatTensor = model.forward(noised_reals, sigma, aug_cond=aug_cond, **extra_args)
+                            mse_losses: FloatTensor = mse_loss_fn(denoiseds, reals)
+                            losses: FloatTensor = (mse_losses * (snr_weightings+1)).clamp_max(model_config['loss_weighting_params']['gamma'])
+                        else:
+                            losses = model.loss(reals, noise, sigma, aug_cond=aug_cond, **extra_args)
                     loss = accelerator.gather(losses).mean().item()
                     losses_since_last_print.append(loss)
                     accelerator.backward(losses.mean())
