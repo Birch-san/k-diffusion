@@ -4,8 +4,10 @@ import math
 from dctorch import functional as df
 from einops import rearrange, repeat
 import torch
-from torch import nn
+from torch import nn, FloatTensor
 from torch.nn import functional as F
+from typing import Literal, Callable, Union, Dict, Any
+from functools import partial
 
 from . import sampling, utils
 
@@ -45,17 +47,21 @@ def freq_weight_nd(shape, scales=0, dtype=None, device=None):
 class Denoiser(nn.Module):
     """A Karras et al. preconditioner for denoising diffusion models."""
 
-    def __init__(self, inner_model, sigma_data=1., weighting='karras', scales=1):
+    def __init__(self, inner_model, sigma_data=1., weighting: Union[Literal['karras', 'soft-min-snr', 'snr', 'min-snr'], Callable[[], FloatTensor]]='karras', scales=1, weighting_params: Dict[str, Any] = {}):
         super().__init__()
         self.inner_model = inner_model
         self.sigma_data = sigma_data
         self.scales = scales
         if callable(weighting):
             self.weighting = weighting
-        if weighting == 'karras':
+        elif weighting == 'karras':
             self.weighting = torch.ones_like
         elif weighting == 'soft-min-snr':
             self.weighting = self._weighting_soft_min_snr
+        elif weighting == 'min-snr':
+            if 'gamma' not in weighting_params:
+                raise ValueError(f'min-snr weighting lacked a gamma property.')
+            self.weighting = partial(self._weighting_min_snr, **weighting_params)
         elif weighting == 'snr':
             self.weighting = self._weighting_snr
         else:
@@ -63,6 +69,11 @@ class Denoiser(nn.Module):
 
     def _weighting_soft_min_snr(self, sigma):
         return (sigma * self.sigma_data) ** 2 / (sigma ** 2 + self.sigma_data ** 2) ** 2
+    
+    def _weighting_min_snr(self, sigma: FloatTensor, gamma: float) -> FloatTensor:
+        snr: FloatTensor = self._weighting_snr(sigma)
+        # very likely to be wrong
+        return snr.clamp_max(self.sigma_data ** 2 / ((gamma+1)/gamma * self.sigma_data ** 2))
 
     def _weighting_snr(self, sigma):
         return self.sigma_data ** 2 / (sigma ** 2 + self.sigma_data ** 2)

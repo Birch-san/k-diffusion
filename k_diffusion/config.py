@@ -2,7 +2,7 @@ from functools import partial
 import json
 import math
 from pathlib import Path
-from typing import Dict, Union
+from typing import Dict, Union, Any
 
 from jsonmerge import merge
 
@@ -90,6 +90,7 @@ def load_config(path_or_dict: Union[str, Dict], use_json5=False):
             'augment_prob': 0.,
             'loss_config': 'karras',
             'loss_weighting': 'karras',
+            'loss_weighting_params': {},
             'loss_scales': 1,
         },
         'dataset': {
@@ -276,9 +277,10 @@ def make_denoiser_wrapper(config):
     loss_config = config.get('loss_config', 'karras')
     if loss_config == 'karras':
         weighting = config.get('loss_weighting', 'karras')
+        weighting_params: Dict[str, Any] = config.get('loss_weighting_params', {})
         scales = config.get('loss_scales', 1)
         if not has_variance:
-            return partial(layers.Denoiser, sigma_data=sigma_data, weighting=weighting, scales=scales)
+            return partial(layers.Denoiser, sigma_data=sigma_data, weighting=weighting, scales=scales, weighting_params=weighting_params)
         return partial(layers.DenoiserWithVariance, sigma_data=sigma_data, weighting=weighting)
     if loss_config == 'simple':
         if has_variance:
