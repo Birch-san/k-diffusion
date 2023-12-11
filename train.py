@@ -988,7 +988,7 @@ def main():
                                 snr_weightings: FloatTensor = model._weighting_snr(sigma).detach()
                             denoiseds: FloatTensor = model.forward(noised_reals, sigma, aug_cond=aug_cond, **extra_args)
                             mse_losses: FloatTensor = mse_loss_fn(denoiseds, reals)
-                            losses: FloatTensor = (mse_losses * (snr_weightings+1)).clamp_max(model_config['loss_weighting_params']['gamma'])
+                            losses: FloatTensor = (mse_losses * (snr_weightings.clamp_max(model_config['loss_weighting_params']['gamma'])))
                         else:
                             losses = model.loss(reals, noise, sigma, aug_cond=aug_cond, **extra_args)
                     loss = accelerator.gather(losses).mean().item()
