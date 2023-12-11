@@ -1003,8 +1003,8 @@ def main():
                             denoiseds: FloatTensor = model.forward(noised_reals, sigma, aug_cond=aug_cond, **extra_args)
                             gamma: float = model_config['loss_weighting_params']['gamma'] if model_config['loss_weighting'] == 'min-snr' else 1.
                             c_weight: FloatTensor = snr_weightings.clamp_max(gamma)
-                            losses: FloatTensor = mse_loss_fn(denoiseds, reals).mean(tuple(range(1, denoiseds.ndim)))
-                            losses.mul_(c_weight)
+                            mse_losses: FloatTensor = mse_loss_fn(denoiseds, reals).mean(tuple(range(1, denoiseds.ndim)))
+                            losses: FloatTensor = mse_losses * c_weight
                         else:
                             losses = model.loss(reals, noise, sigma, aug_cond=aug_cond, **extra_args)
                     loss = accelerator.gather(losses).mean().item()
