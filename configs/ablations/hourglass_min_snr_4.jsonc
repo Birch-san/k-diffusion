@@ -13,10 +13,9 @@
       {"type": "global", "d_head": 64}
     ],
     "loss_config": "karras",
-    // "loss_weighting": "min-snr",
-    // "loss_weighting_params": { "gamma": 5 },
-    "loss_weighting": "min-snr-fix",
-    // min-snr is parameterized on gamma, whereas min-snr-fix is not
+    "loss_weighting": "min-snr",
+    // gamma=5 matches the paper, but to be honest it's so close to sigma_data*-2 that maybe gamma=4 is worth a try
+    "loss_weighting_params": { "gamma": 4 },
     "loss_scales": 1,
     "dropout_rate": [0.0, 0.0],
     "mapping_dropout_rate": 0.0,
