@@ -30,7 +30,7 @@ from tqdm.auto import tqdm
 from typing import Any, List, Optional, Union, Protocol
 from PIL import Image
 from dataclasses import dataclass
-from typing import Optional, TypedDict, Generator, Callable, Literal, Dict, Any
+from typing import Optional, TypedDict, Generator, Callable, Literal, Dict, Any, Tuple
 from contextlib import nullcontext
 from itertools import islice
 from tqdm import tqdm
@@ -524,8 +524,9 @@ def main():
         epoch = 0
         step = 0
 
-    if do_train and model_config['loss_weighting'] == 'min-snr':
-        mse_loss_fn = MSELoss()
+    min_snr_loss_weightings: Tuple[str, ...] = ('min-snr', 'min-snr-fix')
+    if do_train and model_config['loss_weighting'] in min_snr_loss_weightings:
+        mse_loss_fn = MSELoss(reduction='none')
 
     if args.reset_ema:
         if not do_train:
@@ -982,13 +983,28 @@ def main():
                     with K.utils.enable_stratified_accelerate(accelerator, disable=args.gns):
                         sigma = sample_density([reals.shape[0]], device=device)
                     with K.models.checkpointing(args.checkpointing):
-                        if model_config['loss_weighting'] == 'min-snr':
+                        ## min-snr(gamma):
+                        #   gamma = 5
+                        #   snr = 1 / sigma**2
+                        #   c_weight = snr.clamp_max(gamma)
+                        #   losses = c_weight * mse(denoised, reals)
+                        # Kat's suspicion is that gamma=5 is actually just an approximation of sigma_data**-2, so perhaps we can simplify to:
+                        ## min-snr-fix:
+                        #   snr = sigma_data**2 / sigma**2
+                        #   c_weight = snr.clamp_max(1)
+                        #   losses = c_weight * mse(denoised, reals)
+                        if model_config['loss_weighting'] in min_snr_loss_weightings:
                             with torch.no_grad():
                                 noised_reals: FloatTensor = (reals + noise * K.utils.append_dims(sigma, reals.ndim)).detach()
-                                snr_weightings: FloatTensor = model._weighting_snr(sigma).detach()
+                                snr_weightings: FloatTensor = sigma**-2
+                                if model_config['loss_weighting'] == 'min-snr-fix':
+                                    snr_weightings.mul_(model_config['sigma_data']**2)
+                                snr_weightings.detach_()
                             denoiseds: FloatTensor = model.forward(noised_reals, sigma, aug_cond=aug_cond, **extra_args)
-                            mse_losses: FloatTensor = mse_loss_fn(denoiseds, reals)
-                            losses: FloatTensor = (mse_losses * (snr_weightings.clamp_max(model_config['loss_weighting_params']['gamma'])))
+                            gamma: float = model_config['loss_weighting_params']['gamma'] if model_config['loss_weighting'] == 'min-snr' else 1.
+                            c_weight: FloatTensor = snr_weightings.clamp_max(gamma)
+                            losses: FloatTensor = mse_loss_fn(denoiseds, reals).mean(tuple(range(1, denoiseds.ndim)))
+                            losses.mul_(c_weight)
                         else:
                             losses = model.loss(reals, noise, sigma, aug_cond=aug_cond, **extra_args)
                     loss = accelerator.gather(losses).mean().item()
