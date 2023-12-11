@@ -13,8 +13,10 @@
       {"type": "global", "d_head": 64}
     ],
     "loss_config": "karras",
-    "loss_weighting": "min-snr",
-    "loss_weighting_params": { "gamma": 5 },
+    // "loss_weighting": "min-snr",
+    // "loss_weighting_params": { "gamma": 5 },
+    "loss_weighting": "min-snr-fix",
+    // min-snr is parameterized on gamma, whereas min-snr-fix is not
     "loss_scales": 1,
     "dropout_rate": [0.0, 0.0],
     "mapping_dropout_rate": 0.0,

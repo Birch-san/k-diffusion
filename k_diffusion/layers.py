@@ -61,7 +61,13 @@ class Denoiser(nn.Module):
         elif weighting == 'min-snr':
             if 'gamma' not in weighting_params:
                 raise ValueError(f'min-snr weighting lacked a gamma property.')
-            self.weighting = partial(self._weighting_min_snr, **weighting_params)
+            def min_snr():
+                raise NotImplementedError('min-snr loss must be computed via trainer, since implementing it nicely in the Denoiser requires working out how to formulate it in the context of Karras preconditioning')
+            self.weighting = min_snr
+        elif weighting == 'min-snr-fix':
+            def min_snr_fix():
+                raise NotImplementedError('min-snr loss must be computed via trainer, since implementing it nicely in the Denoiser requires working out how to formulate it in the context of Karras preconditioning')
+            self.weighting = min_snr_fix
         elif weighting == 'snr':
             self.weighting = self._weighting_snr
         else:
@@ -69,11 +75,6 @@ class Denoiser(nn.Module):
 
     def _weighting_soft_min_snr(self, sigma):
         return (sigma * self.sigma_data) ** 2 / (sigma ** 2 + self.sigma_data ** 2) ** 2
-    
-    def _weighting_min_snr(self, sigma: FloatTensor, gamma: float) -> FloatTensor:
-        snr: FloatTensor = self._weighting_snr(sigma)
-        # very likely to be wrong
-        return snr.clamp_max(self.sigma_data ** 2 / ((gamma+1)/gamma * self.sigma_data ** 2))
 
     def _weighting_snr(self, sigma):
         return self.sigma_data ** 2 / (sigma ** 2 + self.sigma_data ** 2)
