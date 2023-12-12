@@ -47,7 +47,7 @@ def freq_weight_nd(shape, scales=0, dtype=None, device=None):
 class Denoiser(nn.Module):
     """A Karras et al. preconditioner for denoising diffusion models."""
 
-    def __init__(self, inner_model, sigma_data=1., weighting: Union[Literal['karras', 'soft-min-snr', 'snr', 'min-snr'], Callable[[], FloatTensor]]='karras', scales=1, weighting_params: Dict[str, Any] = {}):
+    def __init__(self, inner_model, sigma_data=1., weighting: Union[Literal['karras', 'soft-min-snr', 'snr', 'min-snr', 'min-snr-fix'], Callable[[], FloatTensor]]='karras', scales=1, weighting_params: Dict[str, Any] = {}):
         super().__init__()
         self.inner_model = inner_model
         self.sigma_data = sigma_data
@@ -61,13 +61,12 @@ class Denoiser(nn.Module):
         elif weighting == 'min-snr':
             if 'gamma' not in weighting_params:
                 raise ValueError(f'min-snr weighting lacked a gamma property.')
-            def min_snr():
-                raise NotImplementedError('min-snr loss must be computed via trainer, since implementing it nicely in the Denoiser requires working out how to formulate it in the context of Karras preconditioning')
-            self.weighting = min_snr
+            self.weighting = partial(self._weighting_min_snr, **weighting_params)
         elif weighting == 'min-snr-fix':
-            def min_snr_fix():
-                raise NotImplementedError('min-snr loss must be computed via trainer, since implementing it nicely in the Denoiser requires working out how to formulate it in the context of Karras preconditioning')
-            self.weighting = min_snr_fix
+            if 'gamma' not in weighting_params:
+                # TODO: find the best place to default this to self.sigma_data ** -2
+                raise ValueError(f'min-snr-fix weighting lacked a gamma property.')
+            self.weighting = partial(self._weighting_min_snr_fix, **weighting_params)
         elif weighting == 'snr':
             self.weighting = self._weighting_snr
         else:
@@ -75,6 +74,26 @@ class Denoiser(nn.Module):
 
     def _weighting_soft_min_snr(self, sigma):
         return (sigma * self.sigma_data) ** 2 / (sigma ** 2 + self.sigma_data ** 2) ** 2
+
+    def _weighting_min_snr(self, sigma: FloatTensor, gamma: float) -> FloatTensor:
+        """
+        Implements min snr weighting with a formulation closer to what's used in the paper
+        https://arxiv.org/abs/2303.09556
+        They assume sigma_data == 1,
+        and they recommend gamma~=5
+        """
+        gamma_t: FloatTensor = torch.atleast_1d(torch.as_tensor(gamma, device=sigma.device, dtype=sigma.dtype))
+        return (sigma ** 2 * torch.minimum(gamma_t, sigma**-2)) / (sigma**2 + 1)
+    
+    def _weighting_min_snr_fix(self, sigma: FloatTensor, gamma: float) -> FloatTensor:
+        """
+        Kat's proposed reformulation of min snr to be parameterised on sigma_data.
+        gamma should be set to sigma_data**-2
+        you'll notice that for RGB photography (sigma_data~=0.5), gamma=sigma_data**-2=4 gives you a value suspiciously close to the paper's
+        recommended gamma=5. this relationship may explain why gamma=5 worked so well for them, and why gamma=4 is worth a try.
+        """
+        gamma_t: FloatTensor = torch.atleast_1d(torch.as_tensor(gamma, device=sigma.device, dtype=sigma.dtype))
+        return (sigma ** 2 * torch.minimum(gamma_t, self.sigma_data**2/sigma**2)) / (sigma**2 + self.sigma_data**2)
 
     def _weighting_snr(self, sigma):
         return self.sigma_data ** 2 / (sigma ** 2 + self.sigma_data ** 2)

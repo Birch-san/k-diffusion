@@ -524,7 +524,11 @@ def main():
         epoch = 0
         step = 0
 
+    # TODO: remove min-snr-fix from this list of overrides, enabling min-snr-fix to go down the tidy path (loss computed in the model) instead.
+    # "loss computed internally" already seems to get identical loss to "loss computed externally", so it seems safe to switch.
+    # but let's wait until we've finished running the min-snr-fix (in "loss computed externally") ablation before we change the behaviour.
     min_snr_loss_weightings: Tuple[str, ...] = ('min-snr', 'min-snr-fix')
+    # min_snr_loss_weightings: Tuple[str, ...] = ('min-snr',)
     if do_train and model_config['loss_weighting'] in min_snr_loss_weightings:
         mse_loss_fn = MSELoss(reduction='none')
 
