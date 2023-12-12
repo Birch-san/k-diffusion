@@ -14,7 +14,9 @@
     ],
     "loss_config": "karras",
     "loss_weighting": "min-snr-fix",
-    // min-snr is parameterized on gamma, whereas min-snr-fix is not
+    // gamma should be set to sigma_data**-2
+    // TODO: find a clean way to make sigma_data**-2 the default but enable overriding (e.g. to compare with the paper's min-snr-5)
+    "loss_weighting_params": { "gamma": 4 },
     "loss_scales": 1,
     "dropout_rate": [0.0, 0.0],
     "mapping_dropout_rate": 0.0,
