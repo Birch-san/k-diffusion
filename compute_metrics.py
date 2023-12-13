@@ -38,6 +38,8 @@ def main():
                    help='configuration file detailing a dataset of ground-truth examples')
     p.add_argument('--torchmetrics-fid', action='store_true',
                    help='whether to use torchmetrics FID (in addition to CleanFID)')
+    p.add_argument('--compile', action='store_true',
+                   help='whether to torch.compile() the feature extractors')
     p.add_argument('--evaluate-n', type=int, default=2000,
                    help='the number of samples to draw to evaluate')
     p.add_argument('--evaluate-with', type=str, nargs='+', default=['inception'],
@@ -143,6 +145,10 @@ def main():
         raise ValueError(f"Invalid evaluation feature extractor '{e}'")
     
     extractors: Dict[ExtractorName, ExtractorType] = {e: accelerator.prepare(get_extractor(e)) for e in args.evaluate_with}
+
+    if args.compile:
+        for extractor in extractors.values():
+            torch.compile(extractor, fullgraph=True, mode='max-autotune')
     
     # taking an iterator is superfluous but gives us a type hint
     pred_train_iter: Iterator[List[FloatTensor]] = iter(pred_train_dl)
@@ -155,6 +161,8 @@ def main():
         # https://torchmetrics.readthedocs.io/en/stable/image/frechet_inception_distance.html
         fid_obj = FrechetInceptionDistance(feature=2048, normalize=True)
         fid_obj: FrechetInceptionDistance = accelerator.prepare(fid_obj)
+        if args.compile:
+            torch.compile(fid_obj, fullgraph=True, mode='max-autotune')
     if accelerator.is_main_process:
         features: Dict[ExtractorName, Dict[Literal['pred', 'target'], List[FloatTensor]]] = {
             extractor: { 'pred': [], 'target': [] } for extractor in extractors.keys()
