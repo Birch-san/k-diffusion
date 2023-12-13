@@ -33,6 +33,8 @@ def main():
                    help='configuration file detailing a dataset of ground-truth examples')
     p.add_argument('--torchmetrics-fid', action='store_true',
                    help='whether to use torchmetrics FID (in addition to CleanFID)')
+    p.add_argument('--sfid', action='store_true',
+                   help='whether to use sFID (in addition to CleanFID)')
     p.add_argument('--evaluate-n', type=int, default=2000,
                    help='the number of samples to draw to evaluate')
     p.add_argument('--evaluate-with', type=str, nargs='+', default=['inception'],
@@ -62,6 +64,9 @@ def main():
 
     mp.set_start_method(args.start_method)
     torch.backends.cuda.matmul.allow_tf32 = True
+
+    if args.sfid:
+        assert 'inception' in args.evaluate_with, "we implement sFID by chopping off the bottom of the inception model, so please enable --evaluate-with inception"
     
     accelerator = accelerate.Accelerator(mixed_precision=args.mixed_precision)
     ensure_distributed()
@@ -118,7 +123,16 @@ def main():
         if e == 'dinov2':
             return DINOv2FeatureExtractor(args.dinov2_model, device=device)
         raise ValueError(f"Invalid evaluation feature extractor '{e}'")
-    extractors: Dict[ExtractorName, ExtractorType] = {e: accelerator.prepare(get_extractor(e)) for e in args.evaluate_with}
+    extractors: Dict[ExtractorName, ExtractorType] = {e: get_extractor(e) for e in args.evaluate_with}
+
+    if args.sfid:
+        from kdiff_trainer.sfid import SFID, ResizeyFeatureExtractor
+        inception: InceptionV3FeatureExtractor = extractors['inception']
+        sfid = SFID(inception.model)
+        resizey_sfid = ResizeyFeatureExtractor(sfid)
+        extractors['sfid'] = resizey_sfid
+
+    extractors = {name: accelerator.prepare(e) for name, e in extractors.items()}
     
     # taking an iterator is superfluous but gives us a type hint
     pred_train_iter: Iterator[List[FloatTensor]] = iter(pred_train_dl)
