@@ -33,8 +33,10 @@ def main():
                    help='configuration file detailing a dataset of ground-truth examples')
     p.add_argument('--torchmetrics-fid', action='store_true',
                    help='whether to use torchmetrics FID (in addition to CleanFID)')
-    p.add_argument('--sfid', action='store_true',
-                   help='whether to use sFID (in addition to CleanFID)')
+    p.add_argument('--sfid-bicubic', action='store_true',
+                   help='whether to use sFID bicubic (in addition to CleanFID)')
+    p.add_argument('--sfid-bilinear', action='store_true',
+                   help='whether to use sFID bilinear (in addition to CleanFID)')
     p.add_argument('--evaluate-n', type=int, default=2000,
                    help='the number of samples to draw to evaluate')
     p.add_argument('--evaluate-with', type=str, nargs='+', default=['inception'],
@@ -65,7 +67,7 @@ def main():
     mp.set_start_method(args.start_method)
     torch.backends.cuda.matmul.allow_tf32 = True
 
-    if args.sfid:
+    if args.sfid_bicubic or args.sfid_bilinear:
         assert 'inception' in args.evaluate_with, "we implement sFID by chopping off the bottom of the inception model, so please enable --evaluate-with inception"
     
     accelerator = accelerate.Accelerator(mixed_precision=args.mixed_precision)
@@ -125,12 +127,21 @@ def main():
         raise ValueError(f"Invalid evaluation feature extractor '{e}'")
     extractors: Dict[ExtractorName, ExtractorType] = {e: get_extractor(e) for e in args.evaluate_with}
 
-    if args.sfid:
-        from kdiff_trainer.sfid import SFID, ResizeyFeatureExtractor
+    if args.sfid_bicubic or args.sfid_bilinear:
+        from kdiff_trainer.eval.sfid import SFID
+        from kdiff_trainer.eval.resizey_feature_extractor import ResizeyFeatureExtractor
+        from kdiff_trainer.eval.bicubic_resize import BicubicResize
+        from kdiff_trainer.eval.inceptionv3_resize import InceptionV3Resize
         inception: InceptionV3FeatureExtractor = extractors['inception']
-        sfid = SFID(inception.model)
-        resizey_sfid = ResizeyFeatureExtractor(sfid)
-        extractors['sfid'] = resizey_sfid
+        sfid = SFID(inception.model.base)
+        if args.sfid_bicubic:
+            bicubic_resize = BicubicResize()
+            sfid_bicubic = ResizeyFeatureExtractor(sfid, bicubic_resize)
+            extractors['sfid-bicubic'] = sfid_bicubic
+        if args.sfid_bilinear:
+            inception_resize = InceptionV3Resize()
+            sfid_bilinear = ResizeyFeatureExtractor(sfid, inception_resize)
+            extractors['sfid-bilinear'] = sfid_bilinear
 
     extractors = {name: accelerator.prepare(e) for name, e in extractors.items()}
     
