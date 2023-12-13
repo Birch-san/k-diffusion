@@ -13,6 +13,7 @@ import math
 from os.path import dirname
 from os import makedirs
 from functools import lru_cache
+import gc
 
 from kdiff_trainer.dataset.get_dataset import get_dataset
 from kdiff_trainer.eval.sfid import SFID
@@ -198,11 +199,13 @@ def main():
                 total_samples += samples_kept
                 pbar.update(samples_kept)
                 assert total_samples <= args.evaluate_n
+                gc.collect()
                 if total_samples == args.evaluate_n:
                     break
             else:
                 raise RuntimeError(f'Exhausted iterator before reaching {args.evaluate_n} {subject} samples. Only got {total_samples}')
     del pred_train_iter, target_train_iter, extractors
+    gc.collect()
 
     receipt_lines: List[str] = [args.result_description]
     def add_to_receipt(line: str) -> str:
@@ -219,6 +222,7 @@ def main():
             assert fid_obj.fake_features_num_samples.item() == args.evaluate_n, f"[torchmetrics FID] you requested --evaluate-n={args.evaluate_n}, but we found {fid_obj.fake_features_num_samples} samples. perhaps the final batch was skipped due to rounding problems. try ensuring that evaluate_n is divisible by batch_size*procs without a remainder, or try simplifying the multi-processing (i.e. single-node or single-GPU)."
             assert fid_obj.fake_features_num_samples.item() == fid_obj.real_features_num_samples.item(), f"[torchmetrics FID] somehow we have a mismatch between number of ground-truth samples ({fid_obj.real_features_num_samples}) and model-predicted samples ({fid_obj.fake_features_num_samples})."
         del fid_obj, tm_fid
+        gc.collect()
     if accelerator.is_main_process:
         # using new variable name rather than reassigning, to get type inference to use the new type
         features_: Dict[ExtractorName, Dict[Literal['pred', 'target'], FloatTensor]] = {
@@ -227,6 +231,7 @@ def main():
             } for extractor_name, features_by_subject in features.items()
         }
         del features
+        gc.collect()
         for extractor_name, features_by_subject in features_.items():
             pred, target = features_by_subject['pred'], features_by_subject['target']
             pred = pred.to(device)
@@ -240,6 +245,7 @@ def main():
             assert pred.shape[0] == args.evaluate_n, f"you requested --evaluate-n={args.evaluate_n}, but we found {pred.shape[0]} samples. perhaps the final batch was skipped due to rounding problems. try ensuring that evaluate_n is divisible by batch_size*procs without a remainder, or try simplifying the multi-processing (i.e. single-node or single-GPU)."
             assert pred.shape[0] == target.shape[0], f"somehow we have a mismatch between number of ground-truth samples ({target.shape[0]}) and model-predicted samples ({pred.shape[0]})."
             del pred, target
+            gc.collect()
 
         if args.result_out_file is not None:
             print(f'Writing receipt to: {args.result_out_file}')
