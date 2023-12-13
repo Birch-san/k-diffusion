@@ -2,11 +2,7 @@ import torch
 from torch import Tensor, FloatTensor
 from torch.nn import Module
 from torch.nn.functional import affine_grid, grid_sample
-from typing import Protocol
-
-class Resize(Protocol):
-  def __call__(self, x: Tensor) -> Tensor: ...
-  def forward(self, x: Tensor) -> Tensor: ...
+from .resizey_feature_extractor import Resize
 
 class InceptionV3Resize(Module, Resize):
   def forward(self, img: Tensor) -> FloatTensor:
