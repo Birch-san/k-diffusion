@@ -191,7 +191,7 @@ def main():
                     extracted = accelerator.gather(extracted)
                     if accelerator.is_main_process:
                         extracted = extracted[:samples_kept]
-                        features[extractor_name][subject].append(extracted)
+                        features[extractor_name][subject].append(extracted.cpu())
                     del extracted
                 if args.torchmetrics_fid:
                     fid_obj.update(samples, subject == 'target')
@@ -229,6 +229,8 @@ def main():
         del features
         for extractor_name, features_by_subject in features_.items():
             pred, target = features_by_subject['pred'], features_by_subject['target']
+            pred = pred.to(device)
+            target = target.to(device)
             initial: Literal['I', 'C', 'D'] = extractor_name[0].upper()
             fid: FloatTensor = K.evaluation.fid(pred, target)
             kid: FloatTensor = K.evaluation.kid(pred, target)
@@ -237,6 +239,7 @@ def main():
             print(add_to_receipt(f'  K{initial}D: {kid.item():g}'))
             assert pred.shape[0] == args.evaluate_n, f"you requested --evaluate-n={args.evaluate_n}, but we found {pred.shape[0]} samples. perhaps the final batch was skipped due to rounding problems. try ensuring that evaluate_n is divisible by batch_size*procs without a remainder, or try simplifying the multi-processing (i.e. single-node or single-GPU)."
             assert pred.shape[0] == target.shape[0], f"somehow we have a mismatch between number of ground-truth samples ({target.shape[0]}) and model-predicted samples ({pred.shape[0]})."
+            del pred, target
 
         if args.result_out_file is not None:
             print(f'Writing receipt to: {args.result_out_file}')
