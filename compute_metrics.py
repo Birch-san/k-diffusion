@@ -12,10 +12,15 @@ from tqdm import tqdm
 import math
 from os.path import dirname
 from os import makedirs
+from functools import lru_cache
 
 from kdiff_trainer.dataset.get_dataset import get_dataset
+from kdiff_trainer.eval.sfid import SFID
+from kdiff_trainer.eval.resizey_feature_extractor import ResizeyFeatureExtractor
+from kdiff_trainer.eval.bicubic_resize import BicubicResize
+from kdiff_trainer.eval.inceptionv3_resize import InceptionV3Resize
 
-ExtractorName = Literal['inception', 'clip', 'dinov2']
+ExtractorName = Literal['inception', 'clip', 'dinov2', 'sfid-bicubic', 'sfid-bilinear']
 ExtractorType = Callable[[FloatTensor], FloatTensor]
 
 def ensure_distributed():
@@ -33,14 +38,10 @@ def main():
                    help='configuration file detailing a dataset of ground-truth examples')
     p.add_argument('--torchmetrics-fid', action='store_true',
                    help='whether to use torchmetrics FID (in addition to CleanFID)')
-    p.add_argument('--sfid-bicubic', action='store_true',
-                   help='whether to use sFID bicubic (in addition to CleanFID)')
-    p.add_argument('--sfid-bilinear', action='store_true',
-                   help='whether to use sFID bilinear (in addition to CleanFID)')
     p.add_argument('--evaluate-n', type=int, default=2000,
                    help='the number of samples to draw to evaluate')
     p.add_argument('--evaluate-with', type=str, nargs='+', default=['inception'],
-                   choices=['inception', 'clip', 'dinov2'],
+                   choices=['inception', 'clip', 'dinov2', 'sfid-bicubic', 'sfid-bilinear'],
                    help='the feature extractor to use for evaluation')
     p.add_argument('--clip-model', type=str, default='ViT-B/16',
                    choices=K.evaluation.CLIPFeatureExtractor.available_models(),
@@ -66,9 +67,6 @@ def main():
 
     mp.set_start_method(args.start_method)
     torch.backends.cuda.matmul.allow_tf32 = True
-
-    if args.sfid_bicubic or args.sfid_bilinear:
-        assert 'inception' in args.evaluate_with, "we implement sFID by chopping off the bottom of the inception model, so please enable --evaluate-with inception"
     
     accelerator = accelerate.Accelerator(mixed_precision=args.mixed_precision)
     ensure_distributed()
@@ -117,33 +115,34 @@ def main():
     pred_train_dl, target_train_dl = (data.DataLoader(train_set, args.batch_size, shuffle=not isinstance(train_set, data.IterableDataset), drop_last=False, num_workers=args.num_workers, persistent_workers=True, pin_memory=True) for train_set in (pred_train_set, target_train_set))
     pred_train_dl, target_train_dl = accelerator.prepare(pred_train_dl, target_train_dl)
 
-    def get_extractor(e: str) -> Union[InceptionV3FeatureExtractor, CLIPFeatureExtractor, DINOv2FeatureExtractor]:
+    @lru_cache(maxsize=1)
+    def get_inception() -> InceptionV3FeatureExtractor:
+        return InceptionV3FeatureExtractor(device=device)
+    
+    @lru_cache(maxsize=1)
+    def get_sfid() -> SFID:
+        inception: InceptionV3FeatureExtractor = get_inception()
+        sfid = SFID(inception.model.base)
+        return sfid
+
+    def get_extractor(e: str) -> Union[InceptionV3FeatureExtractor, CLIPFeatureExtractor, DINOv2FeatureExtractor, ResizeyFeatureExtractor]:
         if e == 'inception':
-            return InceptionV3FeatureExtractor(device=device)
+            return get_inception()
         if e == 'clip':
             return CLIPFeatureExtractor(args.clip_model, device=device)
         if e == 'dinov2':
             return DINOv2FeatureExtractor(args.dinov2_model, device=device)
-        raise ValueError(f"Invalid evaluation feature extractor '{e}'")
-    extractors: Dict[ExtractorName, ExtractorType] = {e: get_extractor(e) for e in args.evaluate_with}
-
-    if args.sfid_bicubic or args.sfid_bilinear:
-        from kdiff_trainer.eval.sfid import SFID
-        from kdiff_trainer.eval.resizey_feature_extractor import ResizeyFeatureExtractor
-        from kdiff_trainer.eval.bicubic_resize import BicubicResize
-        from kdiff_trainer.eval.inceptionv3_resize import InceptionV3Resize
-        inception: InceptionV3FeatureExtractor = extractors['inception']
-        sfid = SFID(inception.model.base)
-        if args.sfid_bicubic:
+        if e == 'sfid-bicubic':
+            sfid = get_sfid()
             bicubic_resize = BicubicResize()
-            sfid_bicubic = ResizeyFeatureExtractor(sfid, bicubic_resize)
-            extractors['sfid-bicubic'] = sfid_bicubic
-        if args.sfid_bilinear:
+            return ResizeyFeatureExtractor(sfid, bicubic_resize)
+        if e == 'sfid-bilinear':
+            sfid = get_sfid()
             inception_resize = InceptionV3Resize()
-            sfid_bilinear = ResizeyFeatureExtractor(sfid, inception_resize)
-            extractors['sfid-bilinear'] = sfid_bilinear
-
-    extractors = {name: accelerator.prepare(e) for name, e in extractors.items()}
+            return ResizeyFeatureExtractor(sfid, inception_resize)
+        raise ValueError(f"Invalid evaluation feature extractor '{e}'")
+    
+    extractors: Dict[ExtractorName, ExtractorType] = {e: accelerator.prepare(get_extractor(e)) for e in args.evaluate_with}
     
     # taking an iterator is superfluous but gives us a type hint
     pred_train_iter: Iterator[List[FloatTensor]] = iter(pred_train_dl)
