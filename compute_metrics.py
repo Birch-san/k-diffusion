@@ -5,6 +5,7 @@ from k_diffusion.evaluation import InceptionV3FeatureExtractor, CLIPFeatureExtra
 from pathlib import Path
 import torch
 from torch import distributed as dist, multiprocessing as mp, FloatTensor, cat
+from torch.nn import Sequential
 from torch.utils import data
 from torchvision import transforms
 from typing import Dict, Literal, Callable, List, Iterator, Union
@@ -20,6 +21,7 @@ from kdiff_trainer.eval.sfid import SFID
 from kdiff_trainer.eval.resizey_feature_extractor import ResizeyFeatureExtractor
 from kdiff_trainer.eval.bicubic_resize import BicubicResize
 from kdiff_trainer.eval.inceptionv3_resize import InceptionV3Resize
+from kdiff_trainer.normalize import Normalize_
 
 ExtractorName = Literal['inception', 'clip', 'dinov2', 'sfid-bicubic', 'sfid-bilinear']
 ExtractorType = Callable[[FloatTensor], FloatTensor]
@@ -138,11 +140,15 @@ def main():
         if e == 'sfid-bicubic':
             sfid = get_sfid()
             bicubic_resize = BicubicResize()
-            return ResizeyFeatureExtractor(sfid, bicubic_resize)
+            # (0, 1) to (-1, 1)
+            normalize = Normalize_(.5, .5).to(device)
+            return Sequential(bicubic_resize, normalize, sfid)
         if e == 'sfid-bilinear':
             sfid = get_sfid()
             inception_resize = InceptionV3Resize()
-            return ResizeyFeatureExtractor(sfid, inception_resize)
+            # (0, 1) to (-1, 1)
+            normalize = Normalize_(.5, .5).to(device)
+            return Sequential(inception_resize, normalize, sfid)
         raise ValueError(f"Invalid evaluation feature extractor '{e}'")
     
     extractors: Dict[ExtractorName, ExtractorType] = {e: accelerator.prepare(get_extractor(e)) for e in args.evaluate_with}
