@@ -15,5 +15,4 @@ class BicubicResize(Module, Resize):
     x = interpolate(x, self.size, mode='bicubic', align_corners=False, antialias=True)
     if x.shape[1] == 1:
       x = torch.cat([x] * 3, dim=1)
-    x = (x * 127.5 + 127.5).clamp(0, 255)
     return x

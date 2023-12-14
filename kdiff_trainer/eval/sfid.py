@@ -1,7 +1,6 @@
 import torch
 from torch import Tensor, FloatTensor
 from torch.nn import Module, Sequential
-from ..normalize import Normalize_
 
 class SFID(Module):
   layers: Sequential
@@ -9,10 +8,8 @@ class SFID(Module):
   def __init__(self, inception_torchscript: Module, use_fp16=False) -> None:
     super().__init__()
     self.use_fp16 = use_fp16
-    normalize = Normalize_(128, 128).to(inception_torchscript.layers.conv.weight.device)
     layers: Module = inception_torchscript.layers
     self.layers = Sequential(
-      normalize,
       layers.conv,
       layers.conv_1,
       layers.conv_2,
