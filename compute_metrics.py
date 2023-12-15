@@ -6,24 +6,27 @@ from pathlib import Path
 import torch
 from torch import distributed as dist, multiprocessing as mp, FloatTensor, cat
 from torch.nn import Sequential
+from torch.nn.functional import kl_div
 from torch.utils import data
 from torchvision import transforms
-from typing import Dict, Literal, Callable, List, Iterator, Union
+from typing import Dict, Literal, Callable, List, Iterator, Union, Set
 from tqdm import tqdm
 import math
 from os.path import dirname
 from os import makedirs
 from functools import lru_cache
 import gc
+# from scipy.stats import entropy
 
 from kdiff_trainer.dataset.get_dataset import get_dataset
 from kdiff_trainer.eval.sfid import SFID
+from kdiff_trainer.eval.inception_score import InceptionSoftmax
 from kdiff_trainer.eval.resizey_feature_extractor import ResizeyFeatureExtractor
 from kdiff_trainer.eval.bicubic_resize import BicubicResize
 from kdiff_trainer.eval.inceptionv3_resize import InceptionV3Resize
 from kdiff_trainer.normalize import Normalize_
 
-ExtractorName = Literal['inception', 'clip', 'dinov2', 'sfid-bicubic', 'sfid-bilinear']
+ExtractorName = Literal['inception', 'clip', 'dinov2', 'sfid-bicubic', 'sfid-bilinear', 'inception-score-bicubic', 'inception-score-bilinear']
 ExtractorType = Callable[[FloatTensor], FloatTensor]
 
 def ensure_distributed():
@@ -46,7 +49,7 @@ def main():
     p.add_argument('--evaluate-n', type=int, default=2000,
                    help='the number of samples to draw to evaluate')
     p.add_argument('--evaluate-with', type=str, nargs='+', default=['inception'],
-                   choices=['inception', 'clip', 'dinov2', 'sfid-bicubic', 'sfid-bilinear'],
+                   choices=['inception', 'clip', 'dinov2', 'sfid-bicubic', 'sfid-bilinear', 'inception-score-bicubic', 'inception-score-bilinear'],
                    help='the feature extractor to use for evaluation')
     p.add_argument('--clip-model', type=str, default='ViT-B/16',
                    choices=K.evaluation.CLIPFeatureExtractor.available_models(),
@@ -129,8 +132,14 @@ def main():
         inception: InceptionV3FeatureExtractor = get_inception()
         sfid = SFID(inception.model.base)
         return sfid
+    
+    @lru_cache(maxsize=1)
+    def get_normalize() -> Normalize_:
+        # (0, 1) to (-1, 1)
+        normalize = Normalize_(.5, .5).to(device)
+        return normalize
 
-    def get_extractor(e: str) -> Union[InceptionV3FeatureExtractor, CLIPFeatureExtractor, DINOv2FeatureExtractor, ResizeyFeatureExtractor]:
+    def get_extractor(e: str) -> Union[InceptionV3FeatureExtractor, CLIPFeatureExtractor, DINOv2FeatureExtractor, Sequential]:
         if e == 'inception':
             return get_inception()
         if e == 'clip':
@@ -140,15 +149,25 @@ def main():
         if e == 'sfid-bicubic':
             sfid = get_sfid()
             bicubic_resize = BicubicResize()
-            # (0, 1) to (-1, 1)
-            normalize = Normalize_(.5, .5).to(device)
+            normalize: Normalize_ = get_normalize()
             return Sequential(bicubic_resize, normalize, sfid)
         if e == 'sfid-bilinear':
-            sfid = get_sfid()
+            sfid: SFID = get_sfid()
             inception_resize = InceptionV3Resize()
-            # (0, 1) to (-1, 1)
-            normalize = Normalize_(.5, .5).to(device)
+            normalize: Normalize_ = get_normalize()
             return Sequential(inception_resize, normalize, sfid)
+        if e == 'inception-score-bicubic':
+            inception: InceptionV3FeatureExtractor = get_inception()
+            inception_softmax = InceptionSoftmax(inception)
+            bicubic_resize = BicubicResize()
+            normalize: Normalize_ = get_normalize()
+            return Sequential(bicubic_resize, normalize, inception_softmax)
+        if e == 'inception-score-bilinear':
+            inception: InceptionV3FeatureExtractor = get_inception()
+            inception_softmax = InceptionSoftmax(inception)
+            inception_resize = InceptionV3Resize()
+            normalize: Normalize_ = get_normalize()
+            return Sequential(inception_resize, normalize, inception_softmax)
         raise ValueError(f"Invalid evaluation feature extractor '{e}'")
     
     extractors: Dict[ExtractorName, ExtractorType] = {e: accelerator.prepare(get_extractor(e)) for e in args.evaluate_with}
@@ -172,8 +191,10 @@ def main():
             torch.compile(fid_obj, fullgraph=True, mode='max-autotune')
     if accelerator.is_main_process:
         features: Dict[ExtractorName, Dict[Literal['pred', 'target'], List[FloatTensor]]] = {
+            # TODO: we could actually pre-allocate a GPU tensor instead of accumulating a list of CPU tensors
             extractor: { 'pred': [], 'target': [] } for extractor in extractors.keys()
         }
+    # TODO: Inception score doesn't require target, so we could avoid requiring it in that case.. or at least avoid computing features
     for subject, iter_ in zip(('pred', 'target'), (pred_train_iter, target_train_iter)):
         # batch sizes from torch dataloader are not *necessarily* equal to the args.batch_size you requested!
         # dataloaders based on webdataset will give a smaller batch when they exhaust a .tar shard.
@@ -238,16 +259,25 @@ def main():
         }
         del features
         gc.collect()
+        wants_entropy_comparison: Set[str] = { 'inception-score-bicubic', 'inception-score-bilinear' }
         for extractor_name, features_by_subject in features_.items():
             pred, target = features_by_subject['pred'], features_by_subject['target']
             pred = pred.to(device)
             target = target.to(device)
             initial: Literal['I', 'C', 'D'] = extractor_name[0].upper()
-            fid: FloatTensor = K.evaluation.fid(pred, target)
-            kid: FloatTensor = K.evaluation.kid(pred, target)
             print(add_to_receipt(f'{extractor_name}, {pred.shape[0]} samples:'))
-            print(add_to_receipt(f'  F{initial}D: {fid.item():g}'))
-            print(add_to_receipt(f'  K{initial}D: {kid.item():g}'))
+            if extractor_name in wants_entropy_comparison:
+                pred_mean = pred.mean(0)
+                # kl_div(pred, pred_mean, reduction='batchmean')
+                kl_div(pred, pred_mean, reduction='batchmean').exp()
+                # kl_div(pred_mean, pred, reduction='batchmean').exp()
+                # kl_div(pred_mean, pred, reduction='none')
+                pass
+            else:
+                fid: FloatTensor = K.evaluation.fid(pred, target)
+                kid: FloatTensor = K.evaluation.kid(pred, target)
+                print(add_to_receipt(f'  F{initial}D: {fid.item():g}'))
+                print(add_to_receipt(f'  K{initial}D: {kid.item():g}'))
             assert pred.shape[0] == args.evaluate_n, f"you requested --evaluate-n={args.evaluate_n}, but we found {pred.shape[0]} samples. perhaps the final batch was skipped due to rounding problems. try ensuring that evaluate_n is divisible by batch_size*procs without a remainder, or try simplifying the multi-processing (i.e. single-node or single-GPU)."
             assert pred.shape[0] == target.shape[0], f"somehow we have a mismatch between number of ground-truth samples ({target.shape[0]}) and model-predicted samples ({pred.shape[0]})."
             del pred, target
