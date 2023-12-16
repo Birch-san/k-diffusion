@@ -5,7 +5,7 @@ from torch.nn import Module, Linear
 
 _imagenet_classes=1000
 
-class InceptionSoftmax(Module):
+class InceptionLogits(Module):
   inception_layers: Module
   use_fp16: bool
   output: Linear
@@ -36,5 +36,4 @@ class InceptionSoftmax(Module):
     features: FloatTensor = self.inception_layers(x)
     features = features.flatten(start_dim=1).float()
     logits: FloatTensor = self.output.forward(features)
-    probabilities: FloatTensor = logits.softmax(-1)
-    return probabilities
+    return logits
