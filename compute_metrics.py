@@ -74,6 +74,8 @@ def main():
     p.add_argument('--evaluate-with', type=str, nargs='+', default=['inception'],
                    choices=['inception', 'clip', 'dinov2', 'sfid-bicubic', 'sfid-bilinear', 'inception-score-bicubic', 'inception-score-bilinear'],
                    help='the feature extractor to use for evaluation')
+    p.add_argument('--inception-score-splits', type=int, default=10,
+                   help='for Inception Score metric: how into how many cohorts should we partition our corpus of samples')
     p.add_argument('--clip-model', type=str, default='ViT-B/16',
                    choices=K.evaluation.CLIPFeatureExtractor.available_models(),
                    help='the CLIP model to use to evaluate')
@@ -167,6 +169,12 @@ def main():
         return sfid
     
     @lru_cache(maxsize=1)
+    def get_inception_softmax() -> InceptionSoftmax:
+        inception: InceptionV3FeatureExtractor = get_inception()
+        inception_softmax = InceptionSoftmax(inception.model.base)
+        return inception_softmax
+    
+    @lru_cache(maxsize=1)
     def get_normalize() -> Normalize_:
         # (0, 1) to (-1, 1)
         normalize = Normalize_(.5, .5).to(device)
@@ -190,14 +198,12 @@ def main():
             normalize: Normalize_ = get_normalize()
             return Sequential(inception_resize, normalize, sfid)
         if e == 'inception-score-bicubic':
-            inception: InceptionV3FeatureExtractor = get_inception()
-            inception_softmax = InceptionSoftmax(inception)
+            inception_softmax: InceptionSoftmax = get_inception_softmax()
             bicubic_resize = BicubicResize()
             normalize: Normalize_ = get_normalize()
             return Sequential(bicubic_resize, normalize, inception_softmax)
         if e == 'inception-score-bilinear':
-            inception: InceptionV3FeatureExtractor = get_inception()
-            inception_softmax = InceptionSoftmax(inception)
+            inception_softmax: InceptionSoftmax = get_inception_softmax()
             inception_resize = InceptionV3Resize()
             normalize: Normalize_ = get_normalize()
             return Sequential(inception_resize, normalize, inception_softmax)
@@ -289,26 +295,34 @@ def main():
         del fid_obj, tm_fid
         gc.collect()
     if accelerator.is_main_process:
-        wants_kl_div: Set[str] = { 'inception-score-bicubic', 'inception-score-bilinear' }
+        wants_inception_score: Set[str] = { 'inception-score-bicubic', 'inception-score-bilinear' }
         for extractor_name, features_by_subject in features.items():
             pred: FloatTensor = features_by_subject['pred']
             initial: Literal['I', 'C', 'D'] = extractor_name[0].upper()
             print(add_to_receipt(f'{extractor_name}, {pred.shape[0]} samples:'))
-            if extractor_name in wants_kl_div:
-                pred_mean = pred.mean(0)
-                kl_div_: FloatTensor = kl_div(pred.log(), pred_mean, reduction='batchmean').exp()
-                print(add_to_receipt(f'  kl-div: {kl_div_.item():g}'))
-                # (pred * ((pred + 1e-16).log() - (pred_mean.unsqueeze(0) + 1e-16).log())).sum(-1, keepdims=True).mean().exp()
-                # kl_div(pred.log(), pred_mean.unsqueeze(0).log(), reduction='none', log_target=True).sum(-1, keepdims=True).mean().exp()
-                # kl_div(pred.log(), pred_mean.unsqueeze(0).log(), reduction='batchmean', log_target=True).exp()
-                # kl_div(pred.log(), pred_mean, reduction='batchmean').exp()
+            if extractor_name in wants_inception_score:
+                # kl_divs: FloatTensor = pred.new_zeros((args.inception_score_splits, pred.shape[1]))
+                kl_divs: FloatTensor = pred.new_zeros((args.inception_score_splits, 1))
+                # https://github.com/sbarratt/inception-score-pytorch/blob/master/inception_score.py
+                # https://machinelearningmastery.com/how-to-implement-the-inception-score-from-scratch-for-evaluating-generated-images/
+                for p_yx, kl_div_out in zip(torch.chunk(pred, args.inception_score_splits), kl_divs.unbind()):
+                    p_y = p_yx.mean(0)
+                    kl_div_: FloatTensor = kl_div(p_yx.log(), p_y, reduction='batchmean').exp()
+                    kl_div_out.copy_(kl_div_)
+                    # (p_yx * ((p_yx + 1e-16).log() - (p_y.unsqueeze(0) + 1e-16).log())).sum(-1, keepdims=True).mean().exp()
+                    # (pred * ((pred + 1e-16).log() - (pred_mean.unsqueeze(0) + 1e-16).log())).sum(-1, keepdims=True).mean().exp()
+                    # kl_div(pred.log(), pred_mean.unsqueeze(0).log(), reduction='none', log_target=True).sum(-1, keepdims=True).mean().exp()
+                    # kl_div(pred.log(), pred_mean.unsqueeze(0).log(), reduction='batchmean', log_target=True).exp()
+                    # kl_div(pred.log(), pred_mean, reduction='batchmean').exp()
 
-                # from scipy.stats import entropy
-                # entropy(pred[0].cpu().numpy(), pred_mean.cpu().numpy(), axis=0)
-                # (pred[:1] * ((pred[:1] + 1e-16).log() - (pred_mean.unsqueeze(0) + 1e-16).log())).sum(-1, keepdims=True).mean()
-                # np.exp(entropy(pred[0].cpu().numpy(), pred_mean.cpu().numpy(), axis=0))
-                # (pred[:1] * ((pred[:1] + 1e-16).log() - (pred_mean.unsqueeze(0) + 1e-16).log())).sum(-1, keepdims=True).mean().exp()
-                pass
+                    # from scipy.stats import entropy
+                    # entropy(pred[0].cpu().numpy(), pred_mean.cpu().numpy(), axis=0)
+                    # (pred[:1] * ((pred[:1] + 1e-16).log() - (pred_mean.unsqueeze(0) + 1e-16).log())).sum(-1, keepdims=True).mean()
+                    # np.exp(entropy(pred[0].cpu().numpy(), pred_mean.cpu().numpy(), axis=0))
+                    # (pred[:1] * ((pred[:1] + 1e-16).log() - (pred_mean.unsqueeze(0) + 1e-16).log())).sum(-1, keepdims=True).mean().exp()
+                    pass
+                score_avg, score_std = kl_divs.mean(), kl_divs.std()
+                print(add_to_receipt(f'  score: avg={score_avg.item():g} std={score_std.item():g}'))
             else:
                 target: FloatTensor = features_by_subject['target']
                 fid: FloatTensor = K.evaluation.fid(pred, target)
