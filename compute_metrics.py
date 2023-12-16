@@ -17,7 +17,6 @@ from os.path import dirname
 from os import makedirs
 from functools import lru_cache
 import gc
-# from scipy.stats import entropy
 
 from kdiff_trainer.dataset.get_dataset import get_dataset
 from kdiff_trainer.eval.sfid import SFID
@@ -290,17 +289,25 @@ def main():
         del fid_obj, tm_fid
         gc.collect()
     if accelerator.is_main_process:
-        wants_entropy_comparison: Set[str] = { 'inception-score-bicubic', 'inception-score-bilinear' }
+        wants_kl_div: Set[str] = { 'inception-score-bicubic', 'inception-score-bilinear' }
         for extractor_name, features_by_subject in features.items():
             pred: FloatTensor = features_by_subject['pred']
             initial: Literal['I', 'C', 'D'] = extractor_name[0].upper()
             print(add_to_receipt(f'{extractor_name}, {pred.shape[0]} samples:'))
-            if extractor_name in wants_entropy_comparison:
+            if extractor_name in wants_kl_div:
                 pred_mean = pred.mean(0)
-                # kl_div(pred, pred_mean, reduction='batchmean')
-                kl_div(pred, pred_mean, reduction='batchmean').exp()
-                # kl_div(pred_mean, pred, reduction='batchmean').exp()
-                # kl_div(pred_mean, pred, reduction='none')
+                kl_div_: FloatTensor = kl_div(pred.log(), pred_mean, reduction='batchmean').exp()
+                print(add_to_receipt(f'  kl-div: {kl_div_.item():g}'))
+                # (pred * ((pred + 1e-16).log() - (pred_mean.unsqueeze(0) + 1e-16).log())).sum(-1, keepdims=True).mean().exp()
+                # kl_div(pred.log(), pred_mean.unsqueeze(0).log(), reduction='none', log_target=True).sum(-1, keepdims=True).mean().exp()
+                # kl_div(pred.log(), pred_mean.unsqueeze(0).log(), reduction='batchmean', log_target=True).exp()
+                # kl_div(pred.log(), pred_mean, reduction='batchmean').exp()
+
+                # from scipy.stats import entropy
+                # entropy(pred[0].cpu().numpy(), pred_mean.cpu().numpy(), axis=0)
+                # (pred[:1] * ((pred[:1] + 1e-16).log() - (pred_mean.unsqueeze(0) + 1e-16).log())).sum(-1, keepdims=True).mean()
+                # np.exp(entropy(pred[0].cpu().numpy(), pred_mean.cpu().numpy(), axis=0))
+                # (pred[:1] * ((pred[:1] + 1e-16).log() - (pred_mean.unsqueeze(0) + 1e-16).log())).sum(-1, keepdims=True).mean().exp()
                 pass
             else:
                 target: FloatTensor = features_by_subject['target']
