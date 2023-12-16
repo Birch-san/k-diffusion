@@ -4,7 +4,7 @@ import k_diffusion as K
 from k_diffusion.evaluation import InceptionV3FeatureExtractor, CLIPFeatureExtractor, DINOv2FeatureExtractor
 from pathlib import Path
 import torch
-from torch import distributed as dist, multiprocessing as mp, FloatTensor, zeros
+from torch import distributed as dist, multiprocessing as mp, FloatTensor, zeros, inference_mode
 from torch.nn import Sequential
 from torch.nn.functional import kl_div
 from torch.utils import data
@@ -39,6 +39,7 @@ class DatasetConfigAndPath(NamedTuple):
     config_path: str
 
 inception_feature_size=2048
+imagenet_classes=1000
 sfid_feature_size=2023
 extractor_feature_size: Dict[ExtractorName, int] = {
     'inception': inception_feature_size,
@@ -46,8 +47,8 @@ extractor_feature_size: Dict[ExtractorName, int] = {
     'dinov2': 1024,
     'sfid-bicubic': sfid_feature_size,
     'sfid-bilinear': sfid_feature_size,
-    'inception-score-bicubic': inception_feature_size,
-    'inception-score-bilinear': inception_feature_size,
+    'inception-score-bicubic': imagenet_classes,
+    'inception-score-bilinear': imagenet_classes,
 }
 does_extractor_need_targets: Callable[[str], bool]  = lambda extractor: not extractor.startswith('inception-score')
 extractor_target_needs: Dict[ExtractorName, int] = { extractor: does_extractor_need_targets(extractor) for extractor in extractor_feature_size.keys() }
@@ -259,7 +260,8 @@ def main():
                         needs_targets: bool = extractor_target_needs[extractor_name]
                         if not needs_targets:
                             break
-                    extracted: FloatTensor = extractor(samples)
+                    with inference_mode():
+                        extracted: FloatTensor = extractor(samples)
                     extracted = accelerator.gather(extracted)
                     if accelerator.is_main_process:
                         extracted = extracted[:samples_kept]
@@ -307,8 +309,13 @@ def main():
                 # https://machinelearningmastery.com/how-to-implement-the-inception-score-from-scratch-for-evaluating-generated-images/
                 for p_yx, kl_div_out in zip(torch.chunk(pred, args.inception_score_splits), kl_divs.unbind()):
                     p_y = p_yx.mean(0)
-                    kl_div_: FloatTensor = kl_div(p_yx.log(), p_y, reduction='batchmean').exp()
+                    kl_div_: FloatTensor = kl_div(p_y.log(), p_yx, reduction='none').sum(-1).mean().exp()
                     kl_div_out.copy_(kl_div_)
+                    # https://github.com/pytorch/pytorch/commit/8e1ead8e4df3fa8acddd13c8b68d5c26690a9ec1?diff=split&w=0
+                    # these are equal:
+                    # kl_div(p_y.log(), p_yx, reduction='none').sum(-1).mean().exp()
+                    # (p_yx * ((p_yx + 1e-16).log() - (p_y.unsqueeze(0) + 1e-16).log())).sum(-1).mean().exp()
+                    
                     # (p_yx * ((p_yx + 1e-16).log() - (p_y.unsqueeze(0) + 1e-16).log())).sum(-1, keepdims=True).mean().exp()
                     # (pred * ((pred + 1e-16).log() - (pred_mean.unsqueeze(0) + 1e-16).log())).sum(-1, keepdims=True).mean().exp()
                     # kl_div(pred.log(), pred_mean.unsqueeze(0).log(), reduction='none', log_target=True).sum(-1, keepdims=True).mean().exp()
