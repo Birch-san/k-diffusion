@@ -21,7 +21,6 @@ import gc
 from kdiff_trainer.dataset.get_dataset import get_dataset
 from kdiff_trainer.eval.sfid import SFID
 from kdiff_trainer.eval.inception_score import InceptionSoftmax
-from kdiff_trainer.eval.resizey_feature_extractor import ResizeyFeatureExtractor
 from kdiff_trainer.eval.bicubic_resize import BicubicResize
 from kdiff_trainer.eval.inceptionv3_resize import InceptionV3Resize
 from kdiff_trainer.normalize import Normalize_
@@ -303,31 +302,15 @@ def main():
             initial: Literal['I', 'C', 'D'] = extractor_name[0].upper()
             print(add_to_receipt(f'{extractor_name}, {pred.shape[0]} samples:'))
             if extractor_name in wants_inception_score:
-                # kl_divs: FloatTensor = pred.new_zeros((args.inception_score_splits, pred.shape[1]))
                 kl_divs: FloatTensor = pred.new_zeros((args.inception_score_splits, 1))
+                # references:
                 # https://github.com/sbarratt/inception-score-pytorch/blob/master/inception_score.py
                 # https://machinelearningmastery.com/how-to-implement-the-inception-score-from-scratch-for-evaluating-generated-images/
+                # https://github.com/pytorch/pytorch/commit/8e1ead8e4df3fa8acddd13c8b68d5c26690a9ec1?diff=split&w=0
                 for p_yx, kl_div_out in zip(torch.chunk(pred, args.inception_score_splits), kl_divs.unbind()):
                     p_y = p_yx.mean(0)
                     kl_div_: FloatTensor = kl_div(p_y.log(), p_yx, reduction='none').sum(-1).mean().exp()
                     kl_div_out.copy_(kl_div_)
-                    # https://github.com/pytorch/pytorch/commit/8e1ead8e4df3fa8acddd13c8b68d5c26690a9ec1?diff=split&w=0
-                    # these are equal:
-                    # kl_div(p_y.log(), p_yx, reduction='none').sum(-1).mean().exp()
-                    # (p_yx * ((p_yx + 1e-16).log() - (p_y.unsqueeze(0) + 1e-16).log())).sum(-1).mean().exp()
-                    
-                    # (p_yx * ((p_yx + 1e-16).log() - (p_y.unsqueeze(0) + 1e-16).log())).sum(-1, keepdims=True).mean().exp()
-                    # (pred * ((pred + 1e-16).log() - (pred_mean.unsqueeze(0) + 1e-16).log())).sum(-1, keepdims=True).mean().exp()
-                    # kl_div(pred.log(), pred_mean.unsqueeze(0).log(), reduction='none', log_target=True).sum(-1, keepdims=True).mean().exp()
-                    # kl_div(pred.log(), pred_mean.unsqueeze(0).log(), reduction='batchmean', log_target=True).exp()
-                    # kl_div(pred.log(), pred_mean, reduction='batchmean').exp()
-
-                    # from scipy.stats import entropy
-                    # entropy(pred[0].cpu().numpy(), pred_mean.cpu().numpy(), axis=0)
-                    # (pred[:1] * ((pred[:1] + 1e-16).log() - (pred_mean.unsqueeze(0) + 1e-16).log())).sum(-1, keepdims=True).mean()
-                    # np.exp(entropy(pred[0].cpu().numpy(), pred_mean.cpu().numpy(), axis=0))
-                    # (pred[:1] * ((pred[:1] + 1e-16).log() - (pred_mean.unsqueeze(0) + 1e-16).log())).sum(-1, keepdims=True).mean().exp()
-                    pass
                 score_avg, score_std = kl_divs.mean(), kl_divs.std()
                 print(add_to_receipt(f'  score: avg={score_avg.item():g} std={score_std.item():g}'))
             else:
