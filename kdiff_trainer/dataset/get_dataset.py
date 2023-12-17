@@ -8,6 +8,8 @@ from pathlib import Path
 from functools import partial
 from PIL import Image
 from io import BytesIO
+import numpy as np
+from numpy.typing import NDArray
 from dataclasses import dataclass
 
 from ..dataset_meta.get_class_captions import ClassCaptions
@@ -30,12 +32,24 @@ class _ImgFromSample:
         return transformed_tensor
 
 @dataclass
-class _MapClassCondWdsSample:
+class _MapAsciiClassCondWdsSample:
     class_cond_key: str
     img_from_sample: _ImgFromSample
     def __call__(self, sample: Dict) -> Tuple[Image.Image, int]:
         img: Any = self.img_from_sample(sample)
         class_cond = int(sample[self.class_cond_key])
+        return (img, class_cond)
+
+@dataclass
+class _MapNumpyClassCondWdsSample:
+    class_cond_key: str
+    img_from_sample: _ImgFromSample
+    def __call__(self, sample: Dict) -> Tuple[Image.Image, int]:
+        img: Any = self.img_from_sample(sample)
+        cls_bytes: bytes = sample[self.class_cond_key]
+        with BytesIO(cls_bytes) as stream:
+            class_cond_arr: NDArray = np.load(stream)
+            class_cond: int = class_cond_arr.item()
         return (img, class_cond)
 
 @dataclass
@@ -82,6 +96,7 @@ def get_dataset(
     uses_crossattn: bool,
     tf: transforms.Compose,
     class_captions: Optional[ClassCaptions] = None,
+    shuffle_wds = True,
 ) -> Union[Dataset, IterableDataset]:
     if dataset_config['type'] == 'imagefolder':
         return K.utils.FolderOfImages(dataset_config['location'], transform=tf)
@@ -120,13 +135,24 @@ def get_dataset(
         if dataset_config['type'] == 'wds':
             mapper = _MapWdsSample(img_from_sample)
         elif dataset_config['type'] == 'wds-class':
-            mapper = _MapClassCondWdsSample(
-                class_cond_key=dataset_config['class_cond_key'],
-                img_from_sample=img_from_sample,
-            )
+            if dataset_config['class_cond_key'].endswith('.npy'):
+                # legacy
+                mapper = _MapNumpyClassCondWdsSample(
+                    class_cond_key=dataset_config['class_cond_key'],
+                    img_from_sample=img_from_sample,
+                )
+            else:
+                # .txt, etc
+                mapper = _MapAsciiClassCondWdsSample(
+                    class_cond_key=dataset_config['class_cond_key'],
+                    img_from_sample=img_from_sample,
+                )
         else:
             raise ValueError('')
-        return WebDataset(dataset_config['location'], nodesplitter=split_by_node).map(mapper).shuffle(1000)
+        wds = WebDataset(dataset_config['location'], nodesplitter=split_by_node).map(mapper)
+        if shuffle_wds:
+            wds = wds.shuffle(1000)
+        return wds
     if dataset_config['type'] == 'custom':
         import importlib.util
         location = (config_dir / dataset_config['location']).resolve()
