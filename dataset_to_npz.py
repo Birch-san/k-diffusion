@@ -1,12 +1,13 @@
 import argparse
 from pathlib import Path
 from typing import Dict, Any, Union, Callable
-from torch import IntTensor, LongTensor
+from torch import IntTensor, LongTensor, Tensor
 from torch.utils import data
 from torch.utils.data.dataset import Dataset, IterableDataset
 from PIL import Image
 from numpy.typing import NDArray
 import numpy as np
+from tqdm import tqdm
 
 import k_diffusion as K
 from kdiff_trainer.dataset.get_dataset import get_dataset
@@ -17,6 +18,7 @@ def main():
   p.add_argument('--config', type=str, required=True,
                   help='configuration file detailing a dataset of predictions from a model')
   p.add_argument('--out', type=str, required=True, help='Where to save the .npz')
+  p.add_argument('--mem-map-out', type=str, default=None, help='Memory-mapped .dat into which to buffer images')
   p.add_argument('--num-workers', type=int, default=8,
                    help='the number of data loader workers')
   p.add_argument('--batch-size', type=int, default=64)
@@ -53,23 +55,41 @@ def main():
 
   image_key = dataset_config.get('image_key', 0)
   class_key = dataset_config.get('class_key', 1)
+  wrote_classes = False
 
-  images = np.zeros((sample_count, size_h, size_w, 3), dtype=np.uint8)
+  if args.mem_map_out is None:
+    images = np.zeros((sample_count, size_h, size_w, 3), dtype=np.uint8)
+  else:
+    images = np.memmap(args.mem_map_out, shape=(sample_count, size_h, size_w, 3), mode='w+', dtype=np.uint8)
   classes = np.zeros((sample_count), dtype=np.int64)
   # we count samples instead of multiplying batch ix by batch size, because torch dataloader can give varying batch sizes
   # (at least for wds/IterableDataset)
   samples_written = 0
-  for batch in dl:
-    img: IntTensor = batch[image_key]
-    batch_img_count: int = img.size(0)
-    images[samples_written:samples_written+batch_img_count] = img
-    if len(batch) -1 >= class_key:
-      cls: LongTensor = batch[class_key]
-      assert cls.size(0) == batch_img_count
-      classes[samples_written:samples_written+cls.size(0)] = cls
-    samples_written += batch_img_count
+  with tqdm(
+    desc=f'Exporting...',
+    total=sample_count,
+    unit='samp',
+  ) as pbar:
+    for batch in dl:
+      img: IntTensor = batch[image_key]
+      batch_img_count: int = img.size(0)
+      images[samples_written:samples_written+batch_img_count] = img
+      if len(batch) -1 >= class_key:
+        wrote_classes = True
+        cls: LongTensor = batch[class_key]
+        assert cls.size(0) == batch_img_count
+        classes[samples_written:samples_written+cls.size(0)] = cls
+      samples_written += batch_img_count
+      pbar.update(batch_img_count)
   assert samples_written == sample_count
-  np.savez(args.out, arr_0=images, arr_1=class_key)
+  if args.mem_map_out is not None:
+    images.flush()
+    # dunno if this is necessary
+    images = np.memmap(args.mem_map_out, shape=(sample_count, size_h, size_w, 3), mode='r', dtype=np.uint8)
+  arrs: Dict[str, Tensor] = { 'arr_0': images }
+  if wrote_classes:
+    arrs['arr_1'] = classes
+  np.savez(args.out, **arrs)
   print(f'Wrote {samples_written} samples to {args.out}')
 
 if __name__ == '__main__':
