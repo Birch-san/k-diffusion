@@ -308,8 +308,14 @@ def main():
                 # https://machinelearningmastery.com/how-to-implement-the-inception-score-from-scratch-for-evaluating-generated-images/
                 # https://github.com/pytorch/pytorch/commit/8e1ead8e4df3fa8acddd13c8b68d5c26690a9ec1?diff=split&w=0
                 for logits_yx, kl_div_out in zip(torch.chunk(pred, args.inception_score_splits), kl_divs.unbind()):
-                    p_y = logits_yx.softmax(-1).mean(0)
-                    kl_div_: FloatTensor = kl_div(p_y.log(), logits_yx.log_softmax(-1), reduction='none', log_target=True).sum(-1).mean().exp()
+                    # equivalent to:
+                    #   p_y = logits_yx.softmax(-1).mean(0)
+                    #   kl_div_: FloatTensor = kl_div(p_y.log(), logits_yx.log_softmax(-1), reduction='none', log_target=True).sum(-1).mean().exp()
+                    # and hopefully more numerically stable.
+                    # thanks to @ad8e for computing the equivalence
+                    log_p_yx = logits_yx.log_softmax(-1)
+                    log_p_y = log_p_yx.logsumexp(0) - math.log(log_p_yx.size(0))
+                    kl_div_ = kl_div(log_p_y, log_p_yx, reduction='none', log_target=True).sum(-1).mean().exp()
                     kl_div_out.copy_(kl_div_)
                 score_avg, score_std = kl_divs.mean(), kl_divs.std()
                 print(add_to_receipt(f'  score: avg={score_avg.item():g} std={score_std.item():g}'))
