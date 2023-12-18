@@ -114,7 +114,8 @@ def main():
         if args.config_target is None:
             raise ValueError('--config-target must be specified because one of the evaluators specified in --evaluate-with compares predictions to targets')
 
-    config_pred, config_target = (K.config.load_config(config, use_json5=config.endswith('.jsonc')) for config in (args.config_pred, args.config_target))
+    configs: List[Dict[str, Any]] = [K.config.load_config(config, use_json5=config.endswith('.jsonc')) for config in (args.config_pred, *(args.config_target,)*any_needs_targets)]
+    config_pred, *_ = configs
     model_config = config_pred['model']
 
     # TODO: allow non-square input sizes
@@ -130,6 +131,7 @@ def main():
     dataset_config_and_paths: List[DatasetConfigAndPath] = []
     dataset_config_and_paths.append(DatasetConfigAndPath(config_pred['dataset'], args.config_pred))
     if any_needs_targets:
+        _, config_target = configs
         dataset_config_and_paths.append(DatasetConfigAndPath(config_target['dataset'], args.config_target))
     datasets: List[Union[Dataset, IterableDataset]] = [get_dataset(
         dataset_config,
