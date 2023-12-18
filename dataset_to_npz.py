@@ -22,6 +22,7 @@ def main():
   p.add_argument('--num-workers', type=int, default=8,
                    help='the number of data loader workers')
   p.add_argument('--batch-size', type=int, default=64)
+  p.add_argument('--limit', type=int, default=None)
   args = p.parse_args()
   
   config = K.config.load_config(args.config, use_json5=args.config.endswith('.jsonc'))
@@ -30,7 +31,10 @@ def main():
   size_h, size_w = model_config['input_size']
 
   dataset_config: Dict[str, Any] = config['dataset']
-  sample_count: int = dataset_config['estimated_samples']
+  if args.limit is None:
+    sample_count: int = dataset_config['estimated_samples']
+  else:
+    sample_count: int = args.limit
   
   # note: np.asarray() is zero-copy. but the collation will probably copy. either way we are not planning any mutation.
   tf: Callable[[Image.Image], NDArray] = lambda pil: np.asarray(pil)
@@ -73,14 +77,17 @@ def main():
     for batch in dl:
       img: IntTensor = batch[image_key]
       batch_img_count: int = img.size(0)
-      images[samples_written:samples_written+batch_img_count] = img
+      samples_taken: int = min(batch_img_count, sample_count-samples_written)
+      images[samples_written:samples_written+samples_taken] = img[:samples_taken]
       if len(batch) -1 >= class_key:
         wrote_classes = True
         cls: LongTensor = batch[class_key]
         assert cls.size(0) == batch_img_count
-        classes[samples_written:samples_written+cls.size(0)] = cls
-      samples_written += batch_img_count
-      pbar.update(batch_img_count)
+        classes[samples_written:samples_written+samples_taken] = cls[:samples_taken]
+      samples_written += samples_taken
+      pbar.update(samples_taken)
+      if samples_written >= sample_count:
+        break
   assert samples_written == sample_count
   if args.mem_map_out is not None:
     images.flush()
