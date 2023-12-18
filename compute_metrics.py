@@ -109,6 +109,9 @@ def main():
         seeds = torch.randint(-2 ** 63, 2 ** 63 - 1, [accelerator.num_processes], generator=torch.Generator().manual_seed(args.seed))
         torch.manual_seed(seeds[accelerator.process_index])
 
+    if any((extractor.startswith('sfid-') for extractor in args.evaluate_with)):
+        print("!!!\n[WARNING] This sFID implementation gives results much higher than those of OpenAI evaluator.py. Probably wrong. You probably shouldn't use it, unless you are here to fix it.\n!!!")
+
     any_needs_targets: bool = any((extractor_target_needs[extractor] for extractor in args.evaluate_with))
     if any_needs_targets:
         if args.config_target is None:
