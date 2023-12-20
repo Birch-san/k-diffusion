@@ -113,7 +113,7 @@ def main():
     batches_estimate: int = math.ceil(dataset_len_estimate/(args.batch_size*accelerator.num_processes))
 
     train_dl = data.DataLoader(train_set, args.batch_size, shuffle=not isinstance(train_set, data.IterableDataset), drop_last=False,
-                               num_workers=args.num_workers, persistent_workers=True, pin_memory=True)
+                               num_workers=args.num_workers, persistent_workers=args.num_workers>0, pin_memory=True)
     
     vae_kwargs: Dict[str, Any] = {
         'torch_dtype': torch.float16,

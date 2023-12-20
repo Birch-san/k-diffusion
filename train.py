@@ -424,7 +424,7 @@ def main():
     class_key = dataset_config.get('class_key', 1)
 
     train_dl = data.DataLoader(train_set, args.batch_size, shuffle=not isinstance(train_set, data.IterableDataset), drop_last=True,
-                               num_workers=args.num_workers, persistent_workers=True, pin_memory=True)
+                               num_workers=args.num_workers, persistent_workers=args.num_workers>0, pin_memory=True)
 
     if do_train:
         opt, train_dl = accelerator.prepare(opt, train_dl)
