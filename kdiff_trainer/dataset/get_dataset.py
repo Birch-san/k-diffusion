@@ -98,9 +98,15 @@ def get_dataset(
     tf: transforms.Compose,
     class_captions: Optional[ClassCaptions] = None,
     shuffle_wds = True,
+    # returning tuples probably causes a memory leak
+    # https://ppwwyyxx.com/blog/2022/Demystify-RAM-Usage-in-Multiprocess-DataLoader/
+    # but since we support batches including text-conditioning and karras aug conditioning: the trainer currently expects tuples
+    output_tuples = True,
 ) -> Union[Dataset, IterableDataset]:
+    if not output_tuples:
+        assert dataset_config['type'] in ('wds', 'npz', 'imagefolder'), f"non-tuple data output not implemented for dataset type '{dataset_config['type']}'"
     if dataset_config['type'] == 'imagefolder':
-        return K.utils.FolderOfImages(dataset_config['location'], transform=tf)
+        return K.utils.FolderOfImages(dataset_config['location'], transform=tf, output_tuples=output_tuples)
     if dataset_config['type'] == 'imagefolder-class':
         return datasets.ImageFolder(dataset_config['location'], transform=tf)
     if dataset_config['type'] == 'cifar10':
@@ -134,7 +140,10 @@ def get_dataset(
             tf=tf,
         )
         if dataset_config['type'] == 'wds':
-            mapper = _MapWdsSample(img_from_sample)
+            if output_tuples:
+                mapper = _MapWdsSample(img_from_sample)
+            else:
+                mapper = _ImgFromSample(img_from_sample)
         elif dataset_config['type'] == 'wds-class':
             if dataset_config['class_cond_key'].endswith('.npy'):
                 # legacy
@@ -159,6 +168,7 @@ def get_dataset(
             dataset_config['location'],
             dataset_config['npz_image_key'],
             transform=tf,
+            output_tuples=output_tuples,
             )
         return dataset
     if dataset_config['type'] == 'custom':

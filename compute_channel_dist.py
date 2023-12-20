@@ -56,9 +56,6 @@ def main():
     
     config = K.config.load_config(args.config, use_json5=args.config.endswith('.jsonc'))
     dataset_config = config['dataset']
-    # an imagefolder dataset will yield a 2-List[Tensor] of image, class
-    # a huggingface dataset will yield a Dict {image_key: Tensor, class_key: Tensor}
-    image_key: Union[int, str] = dataset_config.get('image_key', 0)
 
     resize_crop: List[Callable] = [] if args.side_length is None else [
         transforms.Resize(args.side_length, interpolation=transforms.InterpolationMode.BICUBIC, antialias=True),
@@ -78,6 +75,10 @@ def main():
         uses_crossattn=False,
         tf=tf,
         class_captions=None,
+        # try to prevent memory leak described in
+        # https://ppwwyyxx.com/blog/2022/Demystify-RAM-Usage-in-Multiprocess-DataLoader/
+        # by returning Tensor instead of Tuple[Tensor]
+        output_tuples=False,
     )
     try:
         dataset_len_estimate: int = len(train_set)
@@ -105,10 +106,7 @@ def main():
     it: Iterator[Union[List[Tensor], Dict[str, Tensor]]] = iter(train_dl)
     for batch_ix, batch in enumerate(tqdm(it, total=batches_estimate)):
         # dataset types such as 'imagefolder' will be lists, 'huggingface' will be dicts
-        assert isinstance(batch, list) or isinstance(batch, dict)
-        if isinstance(batch, list):
-            assert len(batch) == 2, "batch item was not the expected length of 2. perhaps class labels are missing. use dataset type imagefolder-class or wds-class, to get class labels."
-        images = batch[image_key]
+        assert torch.is_tensor(batch)
 
         per_channel_val_mean: FloatTensor = images.mean((-1, -2))
         per_channel_sq_mean: FloatTensor = images.square().mean((-1, -2))
