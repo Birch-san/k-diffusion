@@ -160,7 +160,7 @@ def main():
             except TypeError:
                 pass
 
-    dls: List[data.DataLoader] = [data.DataLoader(train_set, args.batch_size, shuffle=wants_shuffle and not isinstance(train_set, data.IterableDataset), drop_last=False, num_workers=args.num_workers, persistent_workers=True, pin_memory=True) for train_set, wants_shuffle in zip(datasets, wants_shuffles)]
+    dls: List[data.DataLoader] = [data.DataLoader(train_set, args.batch_size, shuffle=wants_shuffle and not isinstance(train_set, data.IterableDataset), drop_last=False, num_workers=args.num_workers, persistent_workers=args.num_workers>0, pin_memory=True) for train_set, wants_shuffle in zip(datasets, wants_shuffles)]
     dls = accelerator.prepare(*dls)
     # if you give prepare() a list (n>1), it returns a Tuple[DataLoader, ...].
     # if you give prepare() a list (n==1), it returns a Dataloader.
