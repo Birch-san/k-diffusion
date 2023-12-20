@@ -13,6 +13,7 @@ from numpy.typing import NDArray
 from dataclasses import dataclass
 
 from ..dataset_meta.get_class_captions import ClassCaptions
+from .npz_dataset import NpzDataset
 
 CustomDatasetConfig: TypeAlias = Dict[str, Any]
 
@@ -153,6 +154,13 @@ def get_dataset(
         if shuffle_wds:
             wds = wds.shuffle(1000)
         return wds
+    if dataset_config['type'] == 'npz':
+        dataset = NpzDataset(
+            dataset_config['location'],
+            dataset_config['npz_image_key'],
+            transform=tf,
+            )
+        return dataset
     if dataset_config['type'] == 'custom':
         import importlib.util
         location = (config_dir / dataset_config['location']).resolve()
