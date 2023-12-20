@@ -2,7 +2,7 @@ import accelerate
 import argparse
 from pathlib import Path
 import torch
-from torch import distributed as dist, multiprocessing as mp, FloatTensor, ByteTensor
+from torch import distributed as dist, multiprocessing as mp, FloatTensor, ByteTensor, Tensor
 from torch.utils import data
 from torch.utils.data.dataset import Dataset, IterableDataset
 from torchvision import transforms
@@ -87,6 +87,8 @@ def main():
         ]
     )
 
+    # for supported dataset types (i.e. non-class-conditional)
+    output_tuples: bool = dataset_config['type'] not in ('wds', 'npz', 'imagefolder')
     train_set: Union[Dataset, IterableDataset] = get_dataset(
         dataset_config,
         config_dir=Path(args.config).parent,
@@ -96,7 +98,7 @@ def main():
         # try to prevent memory leak described in
         # https://ppwwyyxx.com/blog/2022/Demystify-RAM-Usage-in-Multiprocess-DataLoader/
         # by returning Tensor instead of Tuple[Tensor]
-        output_tuples=False,
+        output_tuples=output_tuples,
     )
     try:
         dataset_len_estimate: int = len(train_set)
@@ -121,15 +123,24 @@ def main():
         w_sq: Optional[Welford] = None
 
     samples_analysed = 0
-    it: Iterator[ByteTensor] = iter(train_dl)
-    for batch_ix, images in enumerate(tqdm(it, total=batches_estimate)):
+    if output_tuples:
+        image_key = dataset_config.get('image_key', 0)
+        it: Iterator[List[Tensor]] = iter(train_dl)
+    else:
+        it: Iterator[ByteTensor] = iter(train_dl)
+    for batch_ix, batch in enumerate(tqdm(it, total=batches_estimate)):
+        if output_tuples:
+            images: ByteTensor = batch[image_key]
+        else:
+            images: ByteTensor = batch
+        del batch
         # dataset types such as 'imagefolder' will be lists, 'huggingface' will be dicts
         assert torch.is_tensor(images)
         images = images.float()
         # dataloader gives us [0, 255]. we normalize to [-1, 1]
         images.div_(127.5)
         images.sub_(1)
-        samples_analysed += images*accelerator.num_processes
+        samples_analysed += images.shape[0]*accelerator.num_processes
 
         # if we'd converted PIL->Tensor via transforms.ToTensor(), the height and width dimensions would've been -1, -2:
         # per_channel_val_mean: FloatTensor = images.mean((-1, -2))
