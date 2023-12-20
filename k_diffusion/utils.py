@@ -404,12 +404,22 @@ class FolderOfImages(data.Dataset):
     classes/targets."""
 
     IMG_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.ppm', '.bmp', '.pgm', '.tif', '.tiff', '.webp'}
+    output_tuples: bool
 
-    def __init__(self, root, transform=None):
+    def __init__(
+        self,
+        root: str,
+        transform=None,
+        # returning tuples probably causes a memory leak
+        # https://ppwwyyxx.com/blog/2022/Demystify-RAM-Usage-in-Multiprocess-DataLoader/
+        # but since we support batches including text-conditioning and karras aug conditioning: the trainer currently expects tuples
+        output_tuples = True,
+    ):
         super().__init__()
         self.root = Path(root)
         self.transform = nn.Identity() if transform is None else transform
         self.paths = sorted(path for path in self.root.rglob('*') if path.suffix.lower() in self.IMG_EXTENSIONS)
+        self.output_tuples = output_tuples
 
     def __repr__(self):
         return f'FolderOfImages(root="{self.root}", len: {len(self)})'
@@ -417,12 +427,14 @@ class FolderOfImages(data.Dataset):
     def __len__(self):
         return len(self.paths)
 
-    def __getitem__(self, key):
+    def __getitem__(self, key: int):
         path = self.paths[key]
         with open(path, 'rb') as f:
             image = Image.open(f).convert('RGB')
         image = self.transform(image)
-        return image,
+        if self.output_tuples:
+            return image,
+        return image
 
 
 class CSVLogger:
