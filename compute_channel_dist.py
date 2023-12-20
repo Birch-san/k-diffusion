@@ -2,16 +2,20 @@ import accelerate
 import argparse
 from pathlib import Path
 import torch
-from torch import distributed as dist, multiprocessing as mp, FloatTensor, Tensor
+from torch import distributed as dist, multiprocessing as mp, FloatTensor, ByteTensor
 from torch.utils import data
 from torch.utils.data.dataset import Dataset, IterableDataset
 from torchvision import transforms
-from typing import Optional, Union, Dict, List, Iterator, Callable
+from torchvision.transforms import _functional_pil as F_pil
+from typing import Optional, Union, List, Iterator, Callable
 from tqdm import tqdm
 from os import makedirs
 import gc
 from welford_torch import Welford
 import math
+import numpy as np
+from numpy.typing import NDArray
+from PIL import Image
 
 import k_diffusion as K
 from kdiff_trainer.dataset.get_dataset import get_dataset
@@ -19,6 +23,23 @@ from kdiff_trainer.dataset.get_dataset import get_dataset
 def ensure_distributed():
     if not dist.is_initialized():
         dist.init_process_group(world_size=1, rank=0, store=dist.HashStore())
+
+_mode_to_nptype = {"I": np.int32, "I;16": np.int16, "F": np.float32}
+def _to_pil_style_tensor(pic: Image.Image) -> ByteTensor:
+    """
+    Converts PIL image to tensor with the fewest changes possible (no rescaling, no normalization, no permute, no casting).
+    The reasoning is that rescaling and normalization would be faster on-GPU.
+    And this particular script (compute_channel_dist.py) can compute averages fine with channels-last data, so no permute is needed.
+    To be run in the DataLoader's CPU worker.
+    Returns:
+        ByteTensor range: [0, 255], shape: [h, w, c]
+    """
+    assert pic.mode != "1", "for performance, we do not supoprt 1-bit images; we cannot performantly rescale [0, 1] to [0, 255] inside the CPU worker, and we don't have an easy way to tell the GPU worker that rescaling is required."
+    arr: NDArray = np.array(pic, _mode_to_nptype.get(pic.mode, np.uint8), copy=False)
+    t: ByteTensor = torch.from_numpy(arr)
+    # torchvision ToTensor() use .view() here but to me it looked like a tautology. were they trying to remove batch dims?
+    assert t.shape == (pic.size[1], pic.size[0], F_pil.get_image_num_channels(pic))
+    return t
 
 def main():
     p = argparse.ArgumentParser(description=__doc__,
@@ -46,10 +67,6 @@ def main():
     args = p.parse_args()
     mp.set_start_method(args.start_method)
     torch.backends.cuda.matmul.allow_tf32 = True
-    try:
-        torch._dynamo.config.automatic_dynamic_shapes = False
-    except AttributeError:
-        pass
 
     accelerator = accelerate.Accelerator()
     ensure_distributed()
@@ -65,7 +82,8 @@ def main():
     tf = transforms.Compose(
         [
             *resize_crop,
-            transforms.ToTensor(),
+            # transforms.ToTensor(),
+            _to_pil_style_tensor,
         ]
     )
 
@@ -91,7 +109,7 @@ def main():
     batches_estimate: int = math.ceil(dataset_len_estimate/(args.batch_size*accelerator.num_processes))
 
     train_dl = data.DataLoader(train_set, args.batch_size, shuffle=False, drop_last=False,
-                               num_workers=args.num_workers, persistent_workers=True, pin_memory=True)
+                               num_workers=args.num_workers, persistent_workers=args.num_workers>0, pin_memory=True)
     train_dl = accelerator.prepare(train_dl)
 
     if accelerator.is_main_process:
@@ -102,14 +120,22 @@ def main():
         w_val: Optional[Welford] = None
         w_sq: Optional[Welford] = None
 
-    samples_output = 0
-    it: Iterator[Union[List[Tensor], Dict[str, Tensor]]] = iter(train_dl)
-    for batch_ix, batch in enumerate(tqdm(it, total=batches_estimate)):
+    samples_analysed = 0
+    it: Iterator[ByteTensor] = iter(train_dl)
+    for batch_ix, images in enumerate(tqdm(it, total=batches_estimate)):
         # dataset types such as 'imagefolder' will be lists, 'huggingface' will be dicts
-        assert torch.is_tensor(batch)
+        assert torch.is_tensor(images)
+        images = images.float()
+        # dataloader gives us [0, 255]. we normalize to [-1, 1]
+        images.div_(127.5)
+        images.sub_(1)
+        samples_analysed += images*accelerator.num_processes
 
-        per_channel_val_mean: FloatTensor = images.mean((-1, -2))
-        per_channel_sq_mean: FloatTensor = images.square().mean((-1, -2))
+        # if we'd converted PIL->Tensor via transforms.ToTensor(), the height and width dimensions would've been -1, -2:
+        # per_channel_val_mean: FloatTensor = images.mean((-1, -2))
+        # per_channel_sq_mean: FloatTensor = images.square().mean((-1, -2))
+        per_channel_val_mean: FloatTensor = images.mean((-2, -3))
+        per_channel_sq_mean: FloatTensor = images.square().mean((-2, -3))
         per_channel_val_mean = accelerator.gather(per_channel_val_mean)
         per_channel_sq_mean = accelerator.gather(per_channel_sq_mean)
         if accelerator.is_main_process:
@@ -124,12 +150,12 @@ def main():
                 print(f'Saving averages to {args.out_dir}')
                 torch.save(w_val.mean, f'{args.out_dir}/val.pt')
                 torch.save(w_sq.mean,  f'{args.out_dir}/sq.pt')
-            del per_channel_val_mean, per_channel_sq_mean
-        del per_channel_val_mean, per_channel_sq_mean
+        del images, per_channel_val_mean, per_channel_sq_mean
         gc.collect()
-    print(f"r{accelerator.process_index} done")
+    print(f"r{accelerator.process_index} done.")
     if accelerator.is_main_process:
-        print(f'Output {samples_output} samples. We wanted {dataset_len_estimate}.')
+        print(f'Measured {samples_analysed} samples. We wanted {dataset_len_estimate}.')
+        print("Over-run *is* possible (if batch_size*num_processes doesn't divide into dataset length, or [as I think can happen with wds] batch size can vary from batch-to-batch)")
         print('per-channel val:', w_val.mean.tolist())
         print('per-channel  sq:', w_sq.mean.tolist())
         print('per-channel std:', torch.sqrt(w_sq.mean - w_val.mean**2).tolist())
