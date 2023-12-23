@@ -199,6 +199,8 @@ def main():
                    help="specify a different input size, overriding what's specified in the model's config. intended only as a convenient way of measuring how the model's FLOPs scale with input size.")
     p.add_argument('--grow-levels-for-input-size', action='store_true',
                    help="[when --input-size-override is specified] for each power-of-2 by which the 'override' input size exceeds the config-specified input size, grow the model by duplicating its shallowest level. intended only as a convenient way of measuring how the model's FLOPs *and parameter count* scale with input size, under a 'duplicate shallowest level' scheme for growing the model. for image_transformer_v2 models only.")
+    p.add_argument('--use-x0-loss', action='store_true',
+                   help="compute loss in x0-space, i.e. mse(denoised, reals) rather than via the EDM formulation mse(model_output, effective_target). this feature is intended only for verifying whether EDM loss weightings give the same results as corresponding x0 loss weightings.")
     args = p.parse_args()
 
     mp.set_start_method(args.start_method)
@@ -523,14 +525,6 @@ def main():
     else:
         epoch = 0
         step = 0
-
-    # TODO: remove min-snr-fix from this list of overrides, enabling min-snr-fix to go down the tidy path (loss computed in the model) instead.
-    # "loss computed internally" already seems to get identical loss to "loss computed externally", so it seems safe to switch.
-    # but let's wait until we've finished running the min-snr-fix (in "loss computed externally") ablation before we change the behaviour.
-    min_snr_loss_weightings: Tuple[str, ...] = ('min-snr', 'min-snr-fix')
-    # min_snr_loss_weightings: Tuple[str, ...] = ('min-snr',)
-    if do_train and model_config['loss_weighting'] in min_snr_loss_weightings:
-        mse_loss_fn = MSELoss(reduction='none')
 
     if args.reset_ema:
         if not do_train:
@@ -939,6 +933,10 @@ def main():
 
     losses_since_last_print = []
 
+    if do_train and args.use_x0_loss:
+        assert model_config['loss_weighting'] in ('snr', 'soft-min-snr', 'min-snr', 'min-snr-fix')
+        mse_loss_fn = MSELoss(reduction='none')
+
     try:
         while True:
             for batch in tqdm(train_dl, smoothing=0.1, disable=not accelerator.is_main_process):
@@ -987,26 +985,34 @@ def main():
                     with K.utils.enable_stratified_accelerate(accelerator, disable=args.gns):
                         sigma = sample_density([reals.shape[0]], device=device)
                     with K.models.checkpointing(args.checkpointing):
+                        # we can compute loss in x0 space, weighted c_weight
+                        #   losses = c_weight * mse(denoised, reals)
+                        ## snr √:
+                        #   snr = 1 / sigma**2
+                        #   c_weight = snr
                         ## min-snr(gamma):
-                        #   gamma = 5
                         #   snr = 1 / sigma**2
                         #   c_weight = snr.clamp_max(gamma)
-                        #   losses = c_weight * mse(denoised, reals)
-                        # Kat's suspicion is that gamma=5 is actually just an approximation of sigma_data**-2, so perhaps we can simplify to:
-                        ## min-snr-fix:
-                        #   snr = sigma_data**2 / sigma**2
-                        #   c_weight = snr.clamp_max(1)
-                        #   losses = c_weight * mse(denoised, reals)
-                        if model_config['loss_weighting'] in min_snr_loss_weightings:
-                            with torch.no_grad():
-                                noised_reals: FloatTensor = (reals + noise * K.utils.append_dims(sigma, reals.ndim)).detach()
-                                snr_weightings: FloatTensor = sigma**-2
-                                if model_config['loss_weighting'] == 'min-snr-fix':
-                                    snr_weightings.mul_(model_config['sigma_data']**2)
-                                snr_weightings.detach_()
+                        ## min-snr-fix(gamma)
+                        ## - takes sigma_data into consideration
+                        ## - gamma=1/sigma_data**2 is worth trying; sigma_data=0.5 (common for photography) yields gamma=4, suspiciously close to their recommended value of 5
+                        #   snr = 1 / sigma**2
+                        #   c_weight = snr.clamp_max(gamma / sigma_data**2)
+                        ## soft-min-snr:
+                        #   c_weight = 1 / (sigma**2 + sigma_data**2
+                        if args.use_x0_loss:
+                            noised_reals: FloatTensor = reals + noise * K.utils.append_dims(sigma, reals.ndim)
                             denoiseds: FloatTensor = model.forward(noised_reals, sigma, aug_cond=aug_cond, **extra_args)
-                            gamma: float = model_config['loss_weighting_params']['gamma'] if model_config['loss_weighting'] == 'min-snr' else 1.
-                            c_weight: FloatTensor = snr_weightings.clamp_max(gamma)
+                            if model_config['loss_weighting'] == 'soft-min-snr':
+                                c_weight: FloatTensor = 1 / (sigma**2 + model_config['sigma_data']**2)
+                            else: # snr, min-snr or min-snr-fix
+                                snr_weightings: FloatTensor = sigma**-2
+                                if model_config['loss_weighting'] in ('min-snr', 'min-snr-fix'):
+                                    gamma: float = model_config['loss_weighting_params']['gamma']
+                                    gamma_scaled: float = gamma if model_config['loss_weighting'] == 'min-snr' else gamma / model_config['sigma_data']**2
+                                    c_weight: FloatTensor = snr_weightings.clamp_max(gamma_scaled)
+                                else: # snr
+                                    c_weight: FloatTensor = snr_weightings
                             mse_losses: FloatTensor = mse_loss_fn(denoiseds, reals).mean(tuple(range(1, denoiseds.ndim)))
                             losses: FloatTensor = mse_losses * c_weight
                         else:
