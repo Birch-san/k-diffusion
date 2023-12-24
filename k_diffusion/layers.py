@@ -73,22 +73,39 @@ class Denoiser(nn.Module):
             raise ValueError(f'Unknown weighting type {weighting}')
 
     def _weighting_soft_min_snr(self, sigma):
+        """
+        It's like min-SNR, except instead of an abrupt clamp, it smoothly transitions from curved to flat, symmetrical around sigma_data.
+        An x0-space version of this would look like:
+          c_weight = 1 / (sigma**2 + sigma_data**2
+          losses = c_weight * mse(denoised, reals)
+        """
         return (sigma * self.sigma_data) ** 2 / (sigma ** 2 + self.sigma_data ** 2) ** 2
 
     def _weighting_min_snr(self, sigma: FloatTensor, gamma: float) -> FloatTensor:
         """
-        Implements min snr weighting with a formulation closer to what's used in the paper
+        Implements min-SNR weighting.
+        Equal to the x0-space weighted loss described in the Min-SNR paper:
+          snr = 1 / sigma**2
+          c_weight = snr.clamp_max(gamma)
+          losses = c_weight * mse(denoised, reals)
         https://arxiv.org/abs/2303.09556
-        They assume sigma_data == 1,
-        and they recommend gamma~=5
+        They recommend gamma~=5
+        They assume sigma_data == 1.
+        This weighting gets the same results at `sigma_data != 1` as x0-space does, but
+        this is *not* corroboration that the x0 or EDM-space formulations are handling the `sigma_data != 1` case *correctly*.
+        See min-snr-fix below for Kat's attempt to consider sigma_data.
         """
         gamma_t: FloatTensor = torch.atleast_1d(torch.as_tensor(gamma, device=sigma.device, dtype=sigma.dtype))
-        return (sigma ** 2 * torch.minimum(gamma_t, sigma**-2)) / (sigma**2 + 1)
+        return (sigma ** 2 * torch.minimum(gamma_t, self.sigma_data**2/sigma**2)) / (sigma**2 + 1)
     
     def _weighting_min_snr_fix(self, sigma: FloatTensor, gamma: float) -> FloatTensor:
         """
         Kat's proposed reformulation of min snr to be parameterised on sigma_data.
-        gamma should be set to sigma_data**-2
+        An x0-space version of this would look like:
+          snr = 1 / sigma**2
+          c_weight = snr.clamp_max(gamma / sigma_data**2)
+          losses = c_weight * mse(denoised, reals)
+        gamma should be set to 1/sigma_data**2
         you'll notice that for RGB photography (sigma_data~=0.5), gamma=sigma_data**-2=4 gives you a value suspiciously close to the paper's
         recommended gamma=5. this relationship may explain why gamma=5 worked so well for them, and why gamma=4 is worth a try.
         """
@@ -96,6 +113,11 @@ class Denoiser(nn.Module):
         return (sigma ** 2 * torch.minimum(gamma_t, self.sigma_data**2/sigma**2)) / (sigma**2 + self.sigma_data**2)
 
     def _weighting_snr(self, sigma):
+        """
+        An x0-space version of this would look like:
+          snr = 1 / sigma**2
+          losses = snr * mse(denoised, reals)
+        """
         return self.sigma_data ** 2 / (sigma ** 2 + self.sigma_data ** 2)
 
     def get_scalings(self, sigma):
