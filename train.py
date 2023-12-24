@@ -934,7 +934,7 @@ def main():
     losses_since_last_print = []
 
     if do_train and args.use_x0_loss:
-        assert model_config['loss_weighting'] in ('snr', 'soft-min-snr', 'min-snr', 'min-snr-fix')
+        assert model_config['loss_weighting'] in ('snr', 'soft-min-snr', 'min-snr', 'min-snr-fix', 'karras')
         mse_loss_fn = MSELoss(reduction='none')
 
     try:
@@ -1000,11 +1000,17 @@ def main():
                         #   c_weight = snr.clamp_max(gamma / sigma_data**2)
                         ## soft-min-snr:
                         #   c_weight = 1 / (sigma**2 + sigma_data**2
+                        ## karras:
+                        ## - for EDM, this config means unweighted EDM loss
+                        ## - this x0 formulation only gives equal loss to EDM for high sigmas
+                        #   c_weight = sigma_data**2
                         if args.use_x0_loss:
                             noised_reals: FloatTensor = reals + noise * K.utils.append_dims(sigma, reals.ndim)
                             denoiseds: FloatTensor = model.forward(noised_reals, sigma, aug_cond=aug_cond, **extra_args)
                             if model_config['loss_weighting'] == 'soft-min-snr':
                                 c_weight: FloatTensor = 1 / (sigma**2 + model_config['sigma_data']**2)
+                            elif model_config['loss_weighting'] == 'karras':
+                                c_weight: float = model_config['sigma_data']**-2
                             else: # snr, min-snr or min-snr-fix
                                 snr_weightings: FloatTensor = sigma**-2
                                 if model_config['loss_weighting'] in ('min-snr', 'min-snr-fix'):
