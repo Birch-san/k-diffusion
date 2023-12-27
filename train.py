@@ -709,20 +709,14 @@ def main():
         while True:
             with tqdm_environ(TqdmOverrides(position=1)):
                 batch: Samples = generate_batch_of_samples()
+            # adapt from training distribution (e.g. sigma_data=1.0) onto VAE's distribution (if latent) or onto reals distribution
+            if normalizer is not None:
+                normalizer.inverse_(batch.x_0)
             if is_latent:
-                latents: FloatTensor = batch.x_0
-                # adapt from standard gaussian onto VAE's distribution
-                normalizer.inverse_(latents)
-                del batch.x_0
                 # VAE decoder outputs a FloatTensor with range approx ±1
-                decoded: DecoderOutput = vae.decode(latents.to(vae.dtype))
+                decoded: DecoderOutput = vae.decode(batch.x_0.to(vae.dtype))
                 batch.x_0 = decoded.sample
-                del decoded, latents
-            else:
-                # even RGB-space models may employ normalization, for example if they want to train with sigma_data=1 assumption
-                if normalizer is not None:
-                    # adapt from training distribution (e.g. sigma_data=1.0) back onto dataset distribution (e.g. sigma_data=0.5)
-                    normalizer.inverse_(batch.x_0)
+                del decoded
             if accelerator.is_main_process:
                 pils: List[Image.Image] = to_pil_images(batch.x_0)
                 if isinstance(batch, ClassConditionalSamples):
@@ -747,15 +741,14 @@ def main():
             pass
 
         batch: Samples = generate_batch_of_samples()
+        # adapt from training distribution (e.g. sigma_data=1.0) onto VAE's distribution (if latent) or onto reals distribution
+        if normalizer is not None:
+            normalizer.inverse_(batch.x_0)
         if is_latent:
-            latents: FloatTensor = batch.x_0
-            # adapt from standard gaussian onto VAE's distribution
-            normalizer.inverse_(latents)
-            del batch.x_0
             # VAE decoder outputs a FloatTensor with range approx ±1
-            decoded: DecoderOutput = vae.decode(latents.to(vae.dtype))
+            decoded: DecoderOutput = vae.decode(batch.x_0.to(vae.dtype))
             batch.x_0 = decoded.sample
-            del decoded, latents
+            del decoded
         if accelerator.is_main_process:
             if class_captions is not None:
                 assert isinstance(batch, ClassConditionalSamples)
@@ -812,14 +805,16 @@ def main():
                 extra_args[class_cond_key] = torch.randint(0, num_classes, [n], device=device)
                 model_fn = make_cfg_model_fn(model_ema)
             x_0: FloatTensor = do_sample(model_fn, x, sigmas, extra_args=extra_args, disable=True)
+            # adapt from training distribution (e.g. sigma_data=1.0) onto VAE's distribution (if latent) or onto reals distribution
+            if normalizer is not None:
+                normalizer.inverse_(x_0)
             return x_0
         if is_latent:
             # wrap sample_fn
             sample_latent = sample_fn
             def sample_fn(n: int) -> FloatTensor:
+                # sample_latent performs denormalization, so these latents have already been moved from training distribution to VAE distribution
                 latents: FloatTensor = sample_latent(n)
-                # adapt from standard gaussian onto VAE's distribution
-                normalizer.inverse_(latents)
                 with torch.inference_mode():
                     decoded: DecoderOutput = vae.decode(latents.to(vae.dtype))
                 return decoded.sample.type_as(latents)
