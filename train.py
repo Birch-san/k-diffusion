@@ -30,7 +30,7 @@ from tqdm.auto import tqdm
 from typing import Any, List, Optional, Union, Protocol
 from PIL import Image
 from dataclasses import dataclass
-from typing import Optional, TypedDict, Generator, Callable, Literal, Dict, Any, Tuple
+from typing import Optional, TypedDict, Generator, Callable, Literal, Dict, Any
 from contextlib import nullcontext
 from itertools import islice
 from tqdm import tqdm
@@ -201,6 +201,8 @@ def main():
                    help="[when --input-size-override is specified] for each power-of-2 by which the 'override' input size exceeds the config-specified input size, grow the model by duplicating its shallowest level. intended only as a convenient way of measuring how the model's FLOPs *and parameter count* scale with input size, under a 'duplicate shallowest level' scheme for growing the model. for image_transformer_v2 models only.")
     p.add_argument('--use-x0-loss', action='store_true',
                    help="compute loss in x0-space, i.e. mse(denoised, reals) rather than via the EDM formulation mse(model_output, effective_target). this feature is intended only for verifying whether EDM loss weightings give the same results as corresponding x0 loss weightings.")
+    p.add_argument('--log-dataset-distribution', action='store_true',
+                   help="Measure/log how close the dataset is to a standard Gaussian. this feature is intended for verifying that you have configured a sane scale-and-shift, or for comparing latent scale-and-shifts against the official SD/SDXL VAE scale factor")
     args = p.parse_args()
 
     mp.set_start_method(args.start_method)
@@ -371,16 +373,29 @@ def main():
         # for FSDP support: model must be prepared separately and before optimizers
         inner_model_ema = accelerator.prepare(inner_model_ema)
 
+    if 'channel_means' in dataset_config or 'channel_squares' in dataset_config or 'channel_stds' in dataset_config:
+        assert 'channel_means' in dataset_config, 'dataset channel normalization attributes are incomplete; channel_means is missing'
+        channel_means: FloatTensor = torch.tensor(dataset_config['channel_means'])
+        if 'channel_stds' in dataset_config:
+            channel_stds: FloatTensor = torch.tensor(dataset_config['channel_stds'])
+        elif 'channel_squares' in dataset_config:
+            channel_squares: FloatTensor = torch.tensor(dataset_config['channel_squares'])
+            channel_stds: FloatTensor = torch.sqrt(channel_squares - channel_means**2)
+            del channel_squares
+        else:
+            raise ValueError('dataset channel normalization attributes are incomplete; neither channel_stds nor channel_squares was found.')
+        normalizer = Normalize(channel_means, channel_stds)
+        del channel_means, channel_stds
+        accelerator.prepare(normalizer)
+    else:
+        normalizer = None
+
     is_latent: bool = dataset_config.get('latents', False)
     if is_latent:
+        assert normalizer is not None, "we assume for now that latents require scale-and-shift. remove this assertion if you've taken countermeasures such as increasing sigma_data to compensate"
         # we don't do resize & center-crop, because our latent datasets are precomputed
         # (via imagenet_vae_loading.py) for a given canvas size
         train_set: Union[Dataset, IterableDataset] = get_latent_dataset(dataset_config)
-        channel_means: FloatTensor = torch.tensor(dataset_config['channel_means'])
-        channel_squares: FloatTensor = torch.tensor(dataset_config['channel_squares'])
-        channel_stds: FloatTensor = torch.sqrt(channel_squares - channel_means**2)
-        normalizer = Normalize(channel_means, channel_stds)
-        del channel_means, channel_squares, channel_stds
 
         # we're just using this to decode demo latents
         from diffusers import AutoencoderKL
@@ -398,7 +413,7 @@ def main():
         maybe_vae_upsample: int = 1 << (len(vae.config.block_out_channels) - 1)
         del vae.encoder
         vae.eval()
-        accelerator.prepare(vae, normalizer)
+        accelerator.prepare(vae)
     else:
         tf = transforms.Compose([
             transforms.Resize(size[0], interpolation=transforms.InterpolationMode.BICUBIC),
@@ -703,6 +718,11 @@ def main():
                 decoded: DecoderOutput = vae.decode(latents.to(vae.dtype))
                 batch.x_0 = decoded.sample
                 del decoded, latents
+            else:
+                # even RGB-space models may employ normalization, for example if they want to train with sigma_data=1 assumption
+                if normalizer is not None:
+                    # adapt from training distribution (e.g. sigma_data=1.0) back onto dataset distribution (e.g. sigma_data=0.5)
+                    normalizer.inverse_(batch.x_0)
             if accelerator.is_main_process:
                 pils: List[Image.Image] = to_pil_images(batch.x_0)
                 if isinstance(batch, ClassConditionalSamples):
@@ -952,18 +972,28 @@ def main():
                     if is_latent:
                         # we are using a dataset of precomputed latents, which means any augmenting would've had to have been done before it was encoded
                         reals: FloatTensor = batch[image_key]
-                        prenorm_means: FloatTensor = reals.mean((0, -1, -2))
-                        prenorm_vars: FloatTensor = reals.var((0, -1, -2))
-                        sdscaled: FloatTensor = reals * vae.config.scaling_factor
-                        sdscaled_means: FloatTensor = sdscaled.mean((0, -1, -2))
-                        sdscaled_vars: FloatTensor = sdscaled.var((0, -1, -2))
                         aug_cond = None
-                        # scale-and-shift from VAE distribution, to standard Gaussian
-                        normalizer.forward_(reals)
-                        normed_means: FloatTensor = reals.mean((0, -1, -2))
-                        normed_vars: FloatTensor = reals.var((0, -1, -2))
                     else:
                         reals, _, aug_cond = batch[image_key]
+
+                    if args.log_dataset_distribution:
+                        prenorm_means: FloatTensor = reals.mean((0, -1, -2))
+                        prenorm_vars: FloatTensor = reals.var((0, -1, -2))
+                        if is_latent:
+                            sdscaled: FloatTensor = reals * vae.config.scaling_factor
+                            sdscaled_means: FloatTensor = sdscaled.mean((0, -1, -2))
+                            sdscaled_vars: FloatTensor = sdscaled.var((0, -1, -2))
+                            del sdscaled
+
+                    # scale-and-shift. usually in order to obtain a standard Gaussian.
+                    # latents may do this (to move from VAE distribution to standard Gaussian)
+                    # or you may do this in order to shift to sigma_data=1 to use a loss weighting not parameterized on sigma_data
+                    if normalizer is not None:
+                        normalizer.forward_(reals)
+                        if args.log_dataset_distribution:
+                            normed_means: FloatTensor = reals.mean((0, -1, -2))
+                            normed_vars: FloatTensor = reals.var((0, -1, -2))
+
                     class_cond, extra_args = None, {}
                     if uses_crossattn:
                         assert precomputed_conds is not None, "cross-attention is currently only implemented for precomputed conditions"
@@ -987,7 +1017,7 @@ def main():
                     with K.models.checkpointing(args.checkpointing):
                         # we can compute loss in x0 space, weighted c_weight
                         #   losses = c_weight * mse(denoised, reals)
-                        ## snr √:
+                        ## snr:
                         #   snr = 1 / sigma**2
                         #   c_weight = snr
                         ## min-snr(gamma):
@@ -1067,21 +1097,24 @@ def main():
                     }
                     if args.gns:
                         log_dict['gradient_noise_scale'] = gns_stats.get_gns()
-                    if is_latent:
-                        for channel_ix, (prenorm_mean, prenorm_var, sdscaled_mean, sdscaled_var, normed_mean, normed_var) in enumerate(zip(
+                    if args.log_dataset_distribution:
+                        for channel_ix, (prenorm_mean, prenorm_var, normed_mean, normed_var) in enumerate(zip(
                             prenorm_means.unbind(),
                             prenorm_vars.unbind(),
-                            sdscaled_means.unbind(),
-                            sdscaled_vars.unbind(),
                             normed_means.unbind(),
                             normed_vars.unbind(),
                         )):
                             log_dict[f'latent_reals_prenorm/mean/{channel_ix}'] = prenorm_mean.item()
                             log_dict[f'latent_reals_prenorm/var/{channel_ix}'] = prenorm_var.item()
-                            log_dict[f'latent_reals_sdscaled/mean/{channel_ix}'] = sdscaled_mean.item()
-                            log_dict[f'latent_reals_sdscaled/var/{channel_ix}'] = sdscaled_var.item()
                             log_dict[f'latent_reals_normed/mean/{channel_ix}'] = normed_mean.item()
                             log_dict[f'latent_reals_normed/var/{channel_ix}'] = normed_var.item()
+                        if is_latent:
+                            for channel_ix, (sdscaled_mean, sdscaled_var) in enumerate(zip(
+                                sdscaled_means.unbind(),
+                                sdscaled_vars.unbind(),
+                            )):
+                                log_dict[f'latent_reals_sdscaled/mean/{channel_ix}'] = sdscaled_mean.item()
+                                log_dict[f'latent_reals_sdscaled/var/{channel_ix}'] = sdscaled_var.item()
                     wandb.log(log_dict, step=step)
 
                 step += 1
