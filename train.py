@@ -692,6 +692,9 @@ def main():
         sigmas = K.sampling.get_sigmas_karras(args.demo_steps, sigma_min, sigma_max, rho=7., device=device)
 
         x_0: FloatTensor = do_sample(model_fn, x, sigmas, extra_args=extra_args, disable=not accelerator.is_main_process)
+        # adapt from training distribution (e.g. sigma_data=1.0) onto VAE's distribution (if latent) or onto reals distribution
+        if normalizer is not None:
+            normalizer.inverse_(x_0)
         x_0 = accelerator.gather(x_0)[:args.sample_n]
         if class_cond is None:
             return Samples(x_0)
@@ -709,9 +712,7 @@ def main():
         while True:
             with tqdm_environ(TqdmOverrides(position=1)):
                 batch: Samples = generate_batch_of_samples()
-            # adapt from training distribution (e.g. sigma_data=1.0) onto VAE's distribution (if latent) or onto reals distribution
-            if normalizer is not None:
-                normalizer.inverse_(batch.x_0)
+            # denormalization/scale-and-shift (such as for VAE) was already done inside generate_batch_of_samples()
             if is_latent:
                 # VAE decoder outputs a FloatTensor with range approx ±1
                 decoded: DecoderOutput = vae.decode(batch.x_0.to(vae.dtype))
@@ -741,9 +742,7 @@ def main():
             pass
 
         batch: Samples = generate_batch_of_samples()
-        # adapt from training distribution (e.g. sigma_data=1.0) onto VAE's distribution (if latent) or onto reals distribution
-        if normalizer is not None:
-            normalizer.inverse_(batch.x_0)
+        # denormalization/scale-and-shift (such as for VAE) was already done inside generate_batch_of_samples()
         if is_latent:
             # VAE decoder outputs a FloatTensor with range approx ±1
             decoded: DecoderOutput = vae.decode(batch.x_0.to(vae.dtype))
