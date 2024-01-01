@@ -1009,37 +1009,15 @@ def main():
                     with K.utils.enable_stratified_accelerate(accelerator, disable=args.gns):
                         sigma = sample_density([reals.shape[0]], device=device)
                     with K.models.checkpointing(args.checkpointing):
-                        # we can compute loss in x0 space, weighted c_weight
-                        #   losses = c_weight * mse(denoised, reals)
                         if args.use_x0_loss:
                             noised_reals: FloatTensor = reals + noise * K.utils.append_dims(sigma, reals.ndim)
                             denoiseds: FloatTensor = model.forward(noised_reals, sigma, aug_cond=aug_cond, **extra_args)
-                            if model_config['loss_weighting'] == 'karras':
-                                c_weight: float = K.layers.weighting_karras_x0(model_config['sigma_data'], sigma)
-                            elif model_config['loss_weighting'] == 'snr':
-                                c_weight: FloatTensor = K.layers.weighting_snr_x0(
-                                    sigma_data=model_config['sigma_data'],
-                                    sigma=sigma,
-                                    snr_adjust_for_sigma_data=model_config['loss_weighting_params']['snr_adjust_for_sigma_data'],
-                                )
-                            elif model_config['loss_weighting'] == 'min-snr':
-                                c_weight: FloatTensor = K.layers.weighting_min_snr_x0(
-                                    sigma_data=model_config['sigma_data'],
-                                    sigma=sigma,
-                                    gamma=model_config['loss_weighting_params']['gamma'],
-                                    snr_adjust_for_sigma_data=model_config['loss_weighting_params']['snr_adjust_for_sigma_data'],
-                                    gamma_adjust_for_sigma_data=model_config['loss_weighting_params']['gamma_adjust_for_sigma_data'],
-                                )
-                            elif model_config['loss_weighting'] == 'soft-min-snr':
-                                c_weight: FloatTensor = K.layers.weighting_soft_min_snr_x0(
-                                    sigma_data=model_config['sigma_data'],
-                                    sigma=sigma,
-                                    gamma=model_config['loss_weighting_params']['gamma'],
-                                    snr_adjust_for_sigma_data=model_config['loss_weighting_params']['snr_adjust_for_sigma_data'],
-                                    gamma_adjust_for_sigma_data=model_config['loss_weighting_params']['gamma_adjust_for_sigma_data'],
-                                )
-                            else:
-                                raise ValueError(f"x0 loss weighting not implemented for '{model_config['loss_weighting']}'")
+                            c_weight: FloatTensor = K.layers.loss_weighting_x0(
+                                loss_weighting=model_config['loss_weighting'],
+                                loss_weighting_params=model_config['loss_weighting_params'],
+                                sigma_data=model_config['sigma_data'],
+                                sigma=sigma,
+                            )
                             mse_losses: FloatTensor = mse_loss_fn(denoiseds, reals).mean(tuple(range(1, denoiseds.ndim)))
                             losses: FloatTensor = mse_losses * c_weight
                         else:
