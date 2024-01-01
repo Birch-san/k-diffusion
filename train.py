@@ -1025,14 +1025,17 @@ def main():
                             noised_reals: FloatTensor = reals + noise * K.utils.append_dims(sigma, reals.ndim)
                             denoiseds: FloatTensor = model.forward(noised_reals, sigma, aug_cond=aug_cond, **extra_args)
                             if model_config['loss_weighting'] == 'soft-min-snr':
-                                gamma: float = model_config['loss_weighting_params']['gamma'] if 'gamma' in model_config['loss_weighting_params'] else model_config['sigma_data']**-2
+                                # TODO: support snr_adjust_for_sigma_data, gamma_adjust_for_sigma_data
+                                gamma: float = model_config['loss_weighting_params']['gamma']
                                 c_weight: FloatTensor = 1 / (sigma**2 + 1/gamma)
                             elif model_config['loss_weighting'] == 'karras':
                                 c_weight: float = (sigma**2 + model_config['sigma_data']**2)/(sigma*model_config['sigma_data'])**2
                             else: # snr, min-snr
-                                snr_weightings: FloatTensor = (model_config['sigma_data']/sigma)**2
+                                signal_std: float = model_config['sigma_data']**2 if model_config['loss_weighting_params']['snr_adjust_for_sigma_data'] else 1
+                                snr_weightings: FloatTensor = signal_std/sigma**2
                                 if model_config['loss_weighting'] == 'min-snr':
-                                    gamma_scaled: float = model_config['loss_weighting_params']['gamma']*model_config['sigma_data']**2
+                                    gamma_scale_factor = model_config['sigma_data']**2 if model_config['loss_weighting_params']['gamma_adjust_for_sigma_data'] else 1
+                                    gamma_scaled: float = model_config['loss_weighting_params']['gamma']*gamma_scale_factor
                                     c_weight: FloatTensor = snr_weightings.clamp_max(gamma_scaled)
                                 else:
                                     c_weight: FloatTensor = snr_weightings
