@@ -89,14 +89,14 @@ class Denoiser(nn.Module):
         Implements min-SNR weighting.
         Equal to the x0-space weighted loss described in the Min-SNR paper, except we don't assume sigma_data=1:
           snr = sigma_data**2 / sigma**2
-          c_weight = snr.clamp_max(gamma/sigma_data**2)
+          c_weight = min(snr, gamma * sigma_data**2)
           losses = c_weight * mse(denoised, reals)
         https://arxiv.org/abs/2303.09556
         They recommend gamma~=5. This might imply that gamma=sigma_data**-2 is worth a try.
         """
         gamma_t: FloatTensor = torch.atleast_1d(torch.as_tensor(gamma, device=sigma.device, dtype=sigma.dtype))
         snr: FloatTensor = self.sigma_data**2/sigma**2
-        return torch.minimum(snr, gamma_t/self.sigma_data**2) / self._x0_correction(sigma)
+        return torch.minimum(snr, gamma_t * self.sigma_data**2) / self._x0_correction(sigma)
 
     def _weighting_snr(self, sigma):
         """
