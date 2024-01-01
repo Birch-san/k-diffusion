@@ -66,6 +66,14 @@ class Denoiser(nn.Module):
             self.weighting = self._weighting_snr
         else:
             raise ValueError(f'Unknown weighting type {weighting}')
+    
+    def _x0_correction(self, sigma: FloatTensor) -> FloatTensor:
+        """
+        Karras loss weighting, λ(σ). Equal to 1/c_out**2
+        If you have an x0 loss weighting, you can divide it by this to derive its corresponding EDM loss weighting.
+        Conversely, if you have an EDM loss weighting: you can multiply it by this to derive its corresponding x0 loss weighting.
+        """
+        return (sigma**2 + self.sigma_data**2)/(sigma*self.sigma_data)**2
 
     def _weighting_soft_min_snr(self, sigma):
         """
@@ -81,13 +89,14 @@ class Denoiser(nn.Module):
         Implements min-SNR weighting.
         Equal to the x0-space weighted loss described in the Min-SNR paper, except we don't assume sigma_data=1:
           snr = sigma_data**2 / sigma**2
-          c_weight = snr.clamp_max(gamma)
+          c_weight = snr.clamp_max(gamma/sigma_data**2)
           losses = c_weight * mse(denoised, reals)
         https://arxiv.org/abs/2303.09556
         They recommend gamma~=5. This might imply that gamma=sigma_data**-2 is worth a try.
         """
         gamma_t: FloatTensor = torch.atleast_1d(torch.as_tensor(gamma, device=sigma.device, dtype=sigma.dtype))
-        return (sigma * self.sigma_data)**2 * torch.minimum(gamma_t, self.sigma_data**2/sigma**2) / (sigma**2 + self.sigma_data**2)
+        snr: FloatTensor = self.sigma_data**2/sigma**2
+        return torch.minimum(snr, gamma_t/self.sigma_data**2) / self._x0_correction(sigma)
 
     def _weighting_snr(self, sigma):
         """
@@ -95,7 +104,8 @@ class Denoiser(nn.Module):
           snr = sigma_data**2 / sigma**2
           losses = snr * mse(denoised, reals)
         """
-        return self.sigma_data ** 4 / (sigma ** 2 + self.sigma_data ** 2)
+        snr: FloatTensor = self.sigma_data**2/sigma**2
+        return snr / self._x0_correction(sigma)
 
     def get_scalings(self, sigma):
         c_skip = self.sigma_data ** 2 / (sigma ** 2 + self.sigma_data ** 2)
