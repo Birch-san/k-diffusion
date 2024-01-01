@@ -57,10 +57,12 @@ class Denoiser(nn.Module):
         elif weighting == 'karras':
             self.weighting = torch.ones_like
         elif weighting == 'soft-min-snr':
-            self.weighting = self._weighting_soft_min_snr
+            if 'gamma' not in weighting_params:
+                weighting_params['gamma'] = sigma_data**-2
+            self.weighting = partial(self._weighting_soft_min_snr, **weighting_params)
         elif weighting == 'min-snr':
             if 'gamma' not in weighting_params:
-                raise ValueError(f'min-snr weighting lacked a gamma property.')
+                raise ValueError(f'min-snr weighting lacked a gamma property. you might consider gamma=sigma_data**-2, or gamma=5 to follow the Min-SNR paper')
             self.weighting = partial(self._weighting_min_snr, **weighting_params)
         elif weighting == 'snr':
             self.weighting = self._weighting_snr
@@ -75,14 +77,14 @@ class Denoiser(nn.Module):
         """
         return (sigma**2 + self.sigma_data**2)/(sigma*self.sigma_data)**2
 
-    def _weighting_soft_min_snr(self, sigma):
+    def _weighting_soft_min_snr(self, sigma: FloatTensor, gamma: float) -> FloatTensor:
         """
         It's like min-SNR, except instead of an abrupt clamp, it smoothly transitions from curved to flat, symmetrical around sigma_data.
         An x0-space version of this would look like:
-          c_weight = 1 / (sigma**2 + sigma_data**2
+          c_weight = 1 / (sigma**2 + 1/gamma)
           losses = c_weight * mse(denoised, reals)
         """
-        return (sigma * self.sigma_data) ** 2 / (sigma ** 2 + self.sigma_data ** 2) ** 2
+        return (sigma**2 + 1/gamma)**-1 / self._x0_correction(sigma)
 
     def _weighting_min_snr(self, sigma: FloatTensor, gamma: float) -> FloatTensor:
         """

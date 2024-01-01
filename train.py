@@ -1025,7 +1025,8 @@ def main():
                             noised_reals: FloatTensor = reals + noise * K.utils.append_dims(sigma, reals.ndim)
                             denoiseds: FloatTensor = model.forward(noised_reals, sigma, aug_cond=aug_cond, **extra_args)
                             if model_config['loss_weighting'] == 'soft-min-snr':
-                                c_weight: FloatTensor = 1 / (sigma**2 + model_config['sigma_data']**2)
+                                gamma: float = model_config['loss_weighting_params']['gamma'] if 'gamma' in model_config['loss_weighting_params'] else model_config['sigma_data']**-2
+                                c_weight: FloatTensor = 1 / (sigma**2 + 1/gamma)
                             elif model_config['loss_weighting'] == 'karras':
                                 c_weight: float = (sigma**2 + model_config['sigma_data']**2)/(sigma*model_config['sigma_data'])**2
                             else: # snr, min-snr
