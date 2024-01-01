@@ -165,6 +165,11 @@ def loss_weighting_x0(
     sigma_data: float,
     sigma: FloatTensor,
 ) -> FloatTensor:
+    """
+    Computes the x0-space loss weighting c_weight, used like so:
+    c_weight = loss_weighting_x0(…)
+    loss = c_weight * mse(denoiseds, reals)
+    """
     if loss_weighting == 'karras':
         return weighting_karras_x0(sigma_data, sigma)
     if loss_weighting == 'snr':
