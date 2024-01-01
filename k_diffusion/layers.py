@@ -47,7 +47,7 @@ def freq_weight_nd(shape, scales=0, dtype=None, device=None):
 class Denoiser(nn.Module):
     """A Karras et al. preconditioner for denoising diffusion models."""
 
-    def __init__(self, inner_model, sigma_data=1., weighting: Union[Literal['karras', 'soft-min-snr', 'snr', 'min-snr', 'min-snr-fix'], Callable[[], FloatTensor]]='karras', scales=1, weighting_params: Dict[str, Any] = {}):
+    def __init__(self, inner_model, sigma_data=1., weighting: Union[Literal['karras', 'soft-min-snr', 'snr', 'min-snr'], Callable[[], FloatTensor]]='karras', scales=1, weighting_params: Dict[str, Any] = {}):
         super().__init__()
         self.inner_model = inner_model
         self.sigma_data = sigma_data
@@ -62,11 +62,6 @@ class Denoiser(nn.Module):
             if 'gamma' not in weighting_params:
                 raise ValueError(f'min-snr weighting lacked a gamma property.')
             self.weighting = partial(self._weighting_min_snr, **weighting_params)
-        elif weighting == 'min-snr-fix':
-            if 'gamma' not in weighting_params:
-                # TODO: find the best place to default this to self.sigma_data ** -2
-                raise ValueError(f'min-snr-fix weighting lacked a gamma property.')
-            self.weighting = partial(self._weighting_min_snr_fix, **weighting_params)
         elif weighting == 'snr':
             self.weighting = self._weighting_snr
         else:
@@ -84,41 +79,23 @@ class Denoiser(nn.Module):
     def _weighting_min_snr(self, sigma: FloatTensor, gamma: float) -> FloatTensor:
         """
         Implements min-SNR weighting.
-        Equal to the x0-space weighted loss described in the Min-SNR paper:
-          snr = 1 / sigma**2
+        Equal to the x0-space weighted loss described in the Min-SNR paper, except we don't assume sigma_data=1:
+          snr = sigma_data**2 / sigma**2
           c_weight = snr.clamp_max(gamma)
           losses = c_weight * mse(denoised, reals)
         https://arxiv.org/abs/2303.09556
-        They recommend gamma~=5
-        They assume sigma_data == 1.
-        This weighting gets the same results at `sigma_data != 1` as x0-space does, but
-        this is *not* corroboration that the x0 or EDM-space formulations are handling the `sigma_data != 1` case *correctly*.
-        See min-snr-fix below for Kat's attempt to consider sigma_data.
+        They recommend gamma~=5. This might imply that gamma=sigma_data**-2 is worth a try.
         """
         gamma_t: FloatTensor = torch.atleast_1d(torch.as_tensor(gamma, device=sigma.device, dtype=sigma.dtype))
-        return (sigma ** 2 * torch.minimum(gamma_t, self.sigma_data**2/sigma**2)) / (sigma**2 + 1)
-    
-    def _weighting_min_snr_fix(self, sigma: FloatTensor, gamma: float) -> FloatTensor:
-        """
-        Kat's proposed reformulation of min snr to be parameterised on sigma_data.
-        An x0-space version of this would look like:
-          snr = 1 / sigma**2
-          c_weight = snr.clamp_max(gamma / sigma_data**2)
-          losses = c_weight * mse(denoised, reals)
-        gamma should be set to 1/sigma_data**2
-        you'll notice that for RGB photography (sigma_data~=0.5), gamma=sigma_data**-2=4 gives you a value suspiciously close to the paper's
-        recommended gamma=5. this relationship may explain why gamma=5 worked so well for them, and why gamma=4 is worth a try.
-        """
-        gamma_t: FloatTensor = torch.atleast_1d(torch.as_tensor(gamma, device=sigma.device, dtype=sigma.dtype))
-        return (sigma ** 2 * torch.minimum(gamma_t, self.sigma_data**2/sigma**2)) / (sigma**2 + self.sigma_data**2)
+        return (sigma * self.sigma_data)**2 * torch.minimum(gamma_t, self.sigma_data**2/sigma**2) / (sigma**2 + self.sigma_data**2)
 
     def _weighting_snr(self, sigma):
         """
         An x0-space version of this would look like:
-          snr = 1 / sigma**2
+          snr = sigma_data**2 / sigma**2
           losses = snr * mse(denoised, reals)
         """
-        return self.sigma_data ** 2 / (sigma ** 2 + self.sigma_data ** 2)
+        return self.sigma_data ** 4 / (sigma ** 2 + self.sigma_data ** 2)
 
     def get_scalings(self, sigma):
         c_skip = self.sigma_data ** 2 / (sigma ** 2 + self.sigma_data ** 2)
