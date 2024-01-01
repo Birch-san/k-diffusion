@@ -1016,9 +1016,9 @@ def main():
                         #   c_weight = snr
                         ## min-snr(gamma):
                         #   snr = sigma_data**2 / sigma**2
-                        #   c_weight = snr.clamp_max(gamma)
+                        #   c_weight = snr.clamp_max(gamma/sigma_data**2)
                         ## soft-min-snr:
-                        #   c_weight = 1 / (sigma**2 + sigma_data**2
+                        #   c_weight = 1 / (sigma**2 + sigma_data**2)
                         ## karras:
                         #   c_weight = (sigma**2 + sigma_data**2)/(sigma*sigma_data)**2
                         if args.use_x0_loss:
@@ -1031,7 +1031,8 @@ def main():
                             else: # snr, min-snr
                                 snr_weightings: FloatTensor = (model_config['sigma_data']/sigma)**2
                                 if model_config['loss_weighting'] == 'min-snr':
-                                    c_weight: FloatTensor = snr_weightings.clamp_max(model_config['loss_weighting_params']['gamma'])
+                                    gamma_scaled: float = model_config['loss_weighting_params']['gamma']/model_config['sigma_data']**2
+                                    c_weight: FloatTensor = snr_weightings.clamp_max(gamma_scaled)
                                 else:
                                     c_weight: FloatTensor = snr_weightings
                             mse_losses: FloatTensor = mse_loss_fn(denoiseds, reals).mean(tuple(range(1, denoiseds.ndim)))
