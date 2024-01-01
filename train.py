@@ -1011,34 +1011,35 @@ def main():
                     with K.models.checkpointing(args.checkpointing):
                         # we can compute loss in x0 space, weighted c_weight
                         #   losses = c_weight * mse(denoised, reals)
-                        ## snr:
-                        #   snr = sigma_data**2 / sigma**2
-                        #   c_weight = snr
-                        ## min-snr(gamma):
-                        #   snr = sigma_data**2 / sigma**2
-                        #   c_weight = min(snr, gamma * sigma_data**2)
-                        ## soft-min-snr:
-                        #   c_weight = 1 / (sigma**2 + sigma_data**2)
-                        ## karras:
-                        #   c_weight = (sigma**2 + sigma_data**2)/(sigma*sigma_data)**2
                         if args.use_x0_loss:
                             noised_reals: FloatTensor = reals + noise * K.utils.append_dims(sigma, reals.ndim)
                             denoiseds: FloatTensor = model.forward(noised_reals, sigma, aug_cond=aug_cond, **extra_args)
-                            if model_config['loss_weighting'] == 'soft-min-snr':
-                                # TODO: support snr_adjust_for_sigma_data, gamma_adjust_for_sigma_data
-                                gamma: float = model_config['loss_weighting_params']['gamma']
-                                c_weight: FloatTensor = 1 / (sigma**2 + 1/gamma)
-                            elif model_config['loss_weighting'] == 'karras':
-                                c_weight: float = (sigma**2 + model_config['sigma_data']**2)/(sigma*model_config['sigma_data'])**2
-                            else: # snr, min-snr
-                                signal_std: float = model_config['sigma_data']**2 if model_config['loss_weighting_params']['snr_adjust_for_sigma_data'] else 1
-                                snr_weightings: FloatTensor = signal_std/sigma**2
-                                if model_config['loss_weighting'] == 'min-snr':
-                                    gamma_scale_factor = model_config['sigma_data']**2 if model_config['loss_weighting_params']['gamma_adjust_for_sigma_data'] else 1
-                                    gamma_scaled: float = model_config['loss_weighting_params']['gamma']*gamma_scale_factor
-                                    c_weight: FloatTensor = snr_weightings.clamp_max(gamma_scaled)
-                                else:
-                                    c_weight: FloatTensor = snr_weightings
+                            if model_config['loss_weighting'] == 'karras':
+                                c_weight: float = K.layers.weighting_karras_x0(model_config['sigma_data'], sigma)
+                            elif model_config['loss_weighting'] == 'snr':
+                                c_weight: FloatTensor = K.layers.weighting_snr_x0(
+                                    sigma_data=model_config['sigma_data'],
+                                    sigma=sigma,
+                                    snr_adjust_for_sigma_data=model_config['loss_weighting_params']['snr_adjust_for_sigma_data'],
+                                )
+                            elif model_config['loss_weighting'] == 'min-snr':
+                                c_weight: FloatTensor = K.layers.weighting_min_snr_x0(
+                                    sigma_data=model_config['sigma_data'],
+                                    sigma=sigma,
+                                    gamma=model_config['loss_weighting_params']['gamma'],
+                                    snr_adjust_for_sigma_data=model_config['loss_weighting_params']['snr_adjust_for_sigma_data'],
+                                    gamma_adjust_for_sigma_data=model_config['loss_weighting_params']['gamma_adjust_for_sigma_data'],
+                                )
+                            elif model_config['loss_weighting'] == 'soft-min-snr':
+                                c_weight: FloatTensor = K.layers.weighting_soft_min_snr_x0(
+                                    sigma_data=model_config['sigma_data'],
+                                    sigma=sigma,
+                                    gamma=model_config['loss_weighting_params']['gamma'],
+                                    snr_adjust_for_sigma_data=model_config['loss_weighting_params']['snr_adjust_for_sigma_data'],
+                                    gamma_adjust_for_sigma_data=model_config['loss_weighting_params']['gamma_adjust_for_sigma_data'],
+                                )
+                            else:
+                                raise ValueError(f"x0 loss weighting not implemented for '{model_config['loss_weighting']}'")
                             mse_losses: FloatTensor = mse_loss_fn(denoiseds, reals).mean(tuple(range(1, denoiseds.ndim)))
                             losses: FloatTensor = mse_losses * c_weight
                         else:
