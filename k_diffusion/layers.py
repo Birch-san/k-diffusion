@@ -159,6 +159,38 @@ def weighting_soft_min_snr_x0(
     assert gamma == sigma_data**-2
     return 1/(sigma**2 + 1/gamma)
 
+def loss_weighting_x0(
+    loss_weighting: Literal['karras', 'snr', 'min-snr', 'soft-min-snr'],
+    loss_weighting_params: Dict[str, Any],
+    sigma_data: float,
+    sigma: FloatTensor,
+) -> FloatTensor:
+    if loss_weighting == 'karras':
+        return weighting_karras_x0(sigma_data, sigma)
+    if loss_weighting == 'snr':
+        return weighting_snr_x0(
+            sigma_data=sigma_data,
+            sigma=sigma,
+            snr_adjust_for_sigma_data=loss_weighting_params['snr_adjust_for_sigma_data'],
+        )
+    if loss_weighting == 'min-snr':
+        return weighting_min_snr_x0(
+            sigma_data=sigma_data,
+            sigma=sigma,
+            gamma=loss_weighting_params['gamma'],
+            snr_adjust_for_sigma_data=loss_weighting_params['snr_adjust_for_sigma_data'],
+            gamma_adjust_for_sigma_data=loss_weighting_params['gamma_adjust_for_sigma_data'],
+        )
+    if loss_weighting == 'soft-min-snr':
+        return weighting_soft_min_snr_x0(
+            sigma_data=sigma_data,
+            sigma=sigma,
+            gamma=loss_weighting_params['gamma'],
+            snr_adjust_for_sigma_data=loss_weighting_params['snr_adjust_for_sigma_data'],
+            gamma_adjust_for_sigma_data=loss_weighting_params['gamma_adjust_for_sigma_data'],
+        )
+    raise ValueError(f"x0 loss weighting not implemented for '{loss_weighting}'")
+
 class Denoiser(nn.Module):
     """A Karras et al. preconditioner for denoising diffusion models."""
 
