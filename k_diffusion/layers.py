@@ -58,14 +58,26 @@ class Denoiser(nn.Module):
             self.weighting = torch.ones_like
         elif weighting == 'soft-min-snr':
             if 'gamma' not in weighting_params:
-                weighting_params['gamma'] = sigma_data**-2
+                raise ValueError(f'soft-min-snr weighting lacked a gamma property. usually config.py would provide a default. gamma=sigma_data**-2 is recommended.')
+            if 'snr_adjust_for_sigma_data' not in weighting_params:
+                raise ValueError(f'soft-min-snr weighting lacked a snr_adjust_for_sigma_data property. usually config.py would provide a default. you might consider snr_adjust_for_sigma_data=True to gain variance-awareness, or snr_adjust_for_sigma_data=False to produce a soft version of official Min-SNR weighting')
+            if 'gamma_adjust_for_sigma_data' not in weighting_params:
+                raise ValueError(f'soft-min-snr weighting lacked a gamma_adjust_for_sigma_data property. usually config.py would provide a default. you might consider gamma_adjust_for_sigma_data=True for our guess at how to achieve variance-awareness, or gamma_adjust_for_sigma_data=False to produce a soft version of official Min-SNR weighting')
+            if weighting_params['gamma_adjust_for_sigma_data']:
+                assert weighting_params['snr_adjust_for_sigma_data'], 'gamma_adjust_for_sigma_data can only be enabled in tandem with snr_adjust_for_sigma_data, as it is a further variance-adjustment'
             self.weighting = partial(self._weighting_soft_min_snr, **weighting_params)
         elif weighting == 'min-snr':
             if 'gamma' not in weighting_params:
-                raise ValueError(f'min-snr weighting lacked a gamma property. you might consider gamma=sigma_data**-2, or gamma=5 to follow the Min-SNR paper')
+                raise ValueError(f'min-snr weighting lacked a gamma property. usually config.py would provide a default. you might consider gamma=sigma_data**-2, or gamma=5 to follow the Min-SNR paper')
+            if 'snr_adjust_for_sigma_data' not in weighting_params:
+                raise ValueError(f'min-snr weighting lacked a snr_adjust_for_sigma_data property. usually config.py would provide a default. you might consider snr_adjust_for_sigma_data=True to gain variance-awareness, or snr_adjust_for_sigma_data=False to follow the Min-SNR paper')
+            if 'gamma_adjust_for_sigma_data' not in weighting_params:
+                raise ValueError(f'min-snr weighting lacked a gamma_adjust_for_sigma_data property. usually config.py would provide a default. you might consider gamma_adjust_for_sigma_data=True for our guess at how to achieve variance-awareness, or gamma_adjust_for_sigma_data=False to follow the Min-SNR paper')
             self.weighting = partial(self._weighting_min_snr, **weighting_params)
         elif weighting == 'snr':
-            self.weighting = self._weighting_snr
+            if 'snr_adjust_for_sigma_data' not in weighting_params:
+                raise ValueError(f'snr weighting lacked a snr_adjust_for_sigma_data property. usually config.py would provide a default. you might consider snr_adjust_for_sigma_data=True to gain variance-awareness, or snr_adjust_for_sigma_data=False to follow the Min-SNR paper')
+            self.weighting = partial(self._weighting_snr, **weighting_params)
         else:
             raise ValueError(f'Unknown weighting type {weighting}')
     
@@ -77,36 +89,74 @@ class Denoiser(nn.Module):
         """
         return (sigma**2 + self.sigma_data**2)/(sigma*self.sigma_data)**2
 
-    def _weighting_soft_min_snr(self, sigma: FloatTensor, gamma: float) -> FloatTensor:
+    def _weighting_soft_min_snr(self, sigma: FloatTensor, gamma: float, snr_adjust_for_sigma_data: bool, gamma_adjust_for_sigma_data: bool) -> FloatTensor:
         """
         It's like min-SNR, except instead of an abrupt clamp, it smoothly transitions from curved to flat, symmetrical around sigma_data.
-        An x0-space version of this would look like:
-          c_weight = 1 / (sigma**2 + 1/gamma)
-          losses = c_weight * mse(denoised, reals)
+        For explanations of snr_adjust_for_sigma_data and gamma_adjust_for_sigma_data: see _weighting_min_snr function.
         """
+        # TODO: support snr_adjust_for_sigma_data, gamma_adjust_for_sigma_data
         return (sigma**2 + 1/gamma)**-1 / self._x0_correction(sigma)
 
-    def _weighting_min_snr(self, sigma: FloatTensor, gamma: float) -> FloatTensor:
+    def _weighting_min_snr(self, sigma: FloatTensor, gamma: float, snr_adjust_for_sigma_data: bool, gamma_adjust_for_sigma_data: bool) -> FloatTensor:
         """
         Implements min-SNR weighting.
-        Equal to the x0-space weighted loss described in the Min-SNR paper, except we don't assume sigma_data=1:
-          snr = sigma_data**2 / sigma**2
-          c_weight = min(snr, gamma * sigma_data**2)
-          losses = c_weight * mse(denoised, reals)
         https://arxiv.org/abs/2303.09556
-        They recommend gamma~=5. This might imply that gamma=sigma_data**-2 is worth a try.
-        """
-        gamma_t: FloatTensor = torch.atleast_1d(torch.as_tensor(gamma, device=sigma.device, dtype=sigma.dtype))
-        snr: FloatTensor = self.sigma_data**2/sigma**2
-        return torch.minimum(snr, gamma_t * self.sigma_data**2) / self._x0_correction(sigma)
 
-    def _weighting_snr(self, sigma):
+        To reproduce Min-SNR paper, choose:
+          gamma=5
+          snr_adjust_for_sigma_data=False
+          gamma_adjust_for_sigma_data=False
+        
+        But we recommend against this; the Min-SNR paper did not take into account the variance in signal (sigma_data).
+
+        Instead we recommend:
+          gamma=sigma_data**-2
+          snr_adjust_for_sigma_data=True
+          gamma_adjust_for_sigma_data=True
+        
+        Because their recommended value of gamma, 5, is suspiciously close to sigma_data**-2 given the common sigma_data value of 0.5.
+
+        snr_adjust_for_sigma_data
+          Whether to consider the variance you expect to see in the signal.
+          Most papers overlook this (and assume sigma_data=1, which can be true if you've standardized your data, e.g. latents).
+          But RGB photography tends to be sigma_data=0.5.
+          False:
+            Defines SNR as 1/sigma**2.
+          True:
+            Defines SNR as sigma_data**2/sigma**2.
+        
+        gamma_adjust_for_sigma_data
+          This is a bit of a guess. Setting both this and snr_adjust_for_sigma_data to True, has nice properties such as:
+          - when gamma=sigma_data**-2, as we suspect might be optimal, it becomes min(snr, 1), which looks significant.
+          - is just a constant scale factor sigma_data**2 away from the official Min-SNR formulation.
+            this could explain how they were able to get good results on sigma_data!=1 datasets without considering sigma_data.
+            i.e. the theory is that Adam grad scaling eliminated any constant scale factors, making their formulation equivalent to this variance-aware version.
+
+          False:
+            min(snr, gamma)
+          True:
+            min(snr, gamma*sigma_data**2)
         """
-        An x0-space version of this would look like:
-          snr = sigma_data**2 / sigma**2
-          losses = snr * mse(denoised, reals)
+        signal_std: float = self.sigma_data**2 if snr_adjust_for_sigma_data else 1
+        snr: FloatTensor = signal_std/sigma**2
+        gamma_t: FloatTensor = torch.atleast_1d(torch.as_tensor(gamma, device=sigma.device, dtype=sigma.dtype))
+        gamma_scale_factor = self.sigma_data**2 if gamma_adjust_for_sigma_data else 1
+        return torch.minimum(snr, gamma_t * gamma_scale_factor) / self._x0_correction(sigma)
+
+    def _weighting_snr(self, sigma: FloatTensor, snr_adjust_for_sigma_data: bool):
         """
-        snr: FloatTensor = self.sigma_data**2/sigma**2
+        SNR (signal-to-noise ratio) loss weighting.
+        snr_adjust_for_sigma_data
+          Whether to consider the variance you expect to see in the signal.
+          Most papers overlook this (and assume sigma_data=1, which can be true if you've standardized your data, e.g. latents).
+          But RGB photography tends to be sigma_data=0.5.
+          False:
+            Defines SNR as 1/sigma**2.
+          True:
+            Defines SNR as sigma_data**2/sigma**2.
+        """
+        signal_std: float = self.sigma_data**2 if snr_adjust_for_sigma_data else 1
+        snr: FloatTensor = signal_std/sigma**2
         return snr / self._x0_correction(sigma)
 
     def get_scalings(self, sigma):

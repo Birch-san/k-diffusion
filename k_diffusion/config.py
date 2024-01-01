@@ -160,7 +160,45 @@ def load_config(path_or_dict: Union[str, Dict], use_json5=False):
         for key in config['model']:
             assert key in ['type', 'dit_variant', 'input_size', 'input_channels'] + ['loss_config', 'loss_weighting', 'loss_scales', 'dropout_rate', 'augment_prob', 'sigma_data', 'sigma_min', 'sigma_max', 'sigma_sample_density'], f"No explicit handling for model config key {key}."
         config['model']['num_classes'] = config['dataset']['num_classes']
-    return merge(defaults, config)
+
+    # first-pass.
+    # this resolves your loss-weighting and sigma_data, enabling us to resolve your loss_weighting_params
+    merged = merge(defaults, config)
+
+    default_loss_weighting_params = {
+        'snr': {
+            # defaults which match how we originally ran the hourglass ablations.
+            # NOTE: setting this to True is recommended, to obtain a more correct (variance-aware) version of SNR.
+            #       it shouldn't practically make any difference though, because Adam grad scaling should remove constant scale factors such as this.
+            'snr_adjust_for_sigma_data': False,
+        },
+        'min-snr': {
+            # defaults which match the Min-SNR paper's implementation
+            'snr_adjust_for_sigma_data': False,
+            'gamma_adjust_for_sigma_data': False,
+            'gamma': 5,
+            # NOTE: the following may be a more correct/variance-aware configuration.
+            #       it shouldn't practically make any difference though, because Adam grad scaling should remove constant scale factors such as this,
+            #       making this implementation equivalent to what's in the Min-SNR paper.
+            # 'snr_adjust_for_sigma_data': True,
+            # 'gamma_adjust_for_sigma_data': True,
+            # 'gamma': config['model']['sigma_data']**-2,
+        },
+        'soft-min-snr': {
+            # defaults which match how we originally ran the hourglass ablations.
+            'snr_adjust_for_sigma_data': False,
+            'gamma_adjust_for_sigma_data': False,
+            'gamma': config['model']['sigma_data']**-2,
+            # NOTE: the following may be a more correct/variance-aware configuration (it's a soft version of variance-aware min-snr).
+            # 'snr_adjust_for_sigma_data': True,
+            # 'gamma_adjust_for_sigma_data': True,
+        }
+    }
+
+    if merged['model']['loss_weighting'] in default_loss_weighting_params.keys():
+        merged['loss_weighting_params'] = merge(default_loss_weighting_params[merged['model']['loss_weighting']], merged['model']['loss_weighting_params'])
+
+    return merged
 
 
 def make_model(config):
