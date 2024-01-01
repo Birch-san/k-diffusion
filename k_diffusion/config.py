@@ -196,7 +196,7 @@ def load_config(path_or_dict: Union[str, Dict], use_json5=False):
     }
 
     if merged['model']['loss_weighting'] in default_loss_weighting_params.keys():
-        merged['loss_weighting_params'] = merge(default_loss_weighting_params[merged['model']['loss_weighting']], merged['model']['loss_weighting_params'])
+        merged['loss_weighting_params'] = {**default_loss_weighting_params[merged['model']['loss_weighting']], **merged['model']['loss_weighting_params']}
 
     return merged
 
