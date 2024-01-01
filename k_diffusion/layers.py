@@ -217,7 +217,12 @@ class Denoiser(nn.Module):
                 raise ValueError(f'soft-min-snr weighting lacked a gamma_adjust_for_sigma_data property. usually config.py would provide a default. you might consider gamma_adjust_for_sigma_data=True for our guess at how to achieve variance-awareness, or gamma_adjust_for_sigma_data=False to produce a soft version of official Min-SNR weighting')
             if weighting_params['gamma_adjust_for_sigma_data']:
                 assert weighting_params['snr_adjust_for_sigma_data'], 'gamma_adjust_for_sigma_data can only be enabled in tandem with snr_adjust_for_sigma_data, as it is a further variance-adjustment'
-            self.weighting = partial(self._weighting_soft_min_snr, **weighting_params)
+            self.weighting = partial(
+                self._weighting_soft_min_snr,
+                gamma=weighting_params['gamma'],
+                snr_adjust_for_sigma_data=weighting_params['snr_adjust_for_sigma_data'],
+                gamma_adjust_for_sigma_data=weighting_params['gamma_adjust_for_sigma_data'],
+            )
         elif weighting == 'min-snr':
             if 'gamma' not in weighting_params:
                 raise ValueError(f'min-snr weighting lacked a gamma property. usually config.py would provide a default. you might consider gamma=sigma_data**-2, or gamma=5 to follow the Min-SNR paper')
@@ -225,11 +230,19 @@ class Denoiser(nn.Module):
                 raise ValueError(f'min-snr weighting lacked a snr_adjust_for_sigma_data property. usually config.py would provide a default. you might consider snr_adjust_for_sigma_data=True to gain variance-awareness, or snr_adjust_for_sigma_data=False to follow the Min-SNR paper')
             if 'gamma_adjust_for_sigma_data' not in weighting_params:
                 raise ValueError(f'min-snr weighting lacked a gamma_adjust_for_sigma_data property. usually config.py would provide a default. you might consider gamma_adjust_for_sigma_data=True for our guess at how to achieve variance-awareness, or gamma_adjust_for_sigma_data=False to follow the Min-SNR paper')
-            self.weighting = partial(self._weighting_min_snr, **weighting_params)
+            self.weighting = partial(
+                self._weighting_min_snr,
+                gamma=weighting_params['gamma'],
+                snr_adjust_for_sigma_data=weighting_params['snr_adjust_for_sigma_data'],
+                gamma_adjust_for_sigma_data=weighting_params['gamma_adjust_for_sigma_data'],
+            )
         elif weighting == 'snr':
             if 'snr_adjust_for_sigma_data' not in weighting_params:
                 raise ValueError(f'snr weighting lacked a snr_adjust_for_sigma_data property. usually config.py would provide a default. you might consider snr_adjust_for_sigma_data=True to gain variance-awareness, or snr_adjust_for_sigma_data=False to follow the Min-SNR paper')
-            self.weighting = partial(self._weighting_snr, **weighting_params)
+            self.weighting = partial(
+                self._weighting_snr,
+                snr_adjust_for_sigma_data=weighting_params['snr_adjust_for_sigma_data'],
+            )
         else:
             raise ValueError(f'Unknown weighting type {weighting}')
 
