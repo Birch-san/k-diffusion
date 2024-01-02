@@ -182,13 +182,13 @@ def load_config(path_or_dict: Union[str, Dict], use_json5=False):
             #       making this implementation equivalent to what's in the Min-SNR paper.
             # 'snr_adjust_for_sigma_data': True,
             # 'gamma_adjust_for_sigma_data': True,
-            # 'gamma': config['model']['sigma_data']**-2,
+            # 'gamma': merged['model']['sigma_data']**-2,
         },
         'soft-min-snr': {
             # defaults which match how we originally ran the hourglass ablations.
             'snr_adjust_for_sigma_data': False,
             'gamma_adjust_for_sigma_data': False,
-            'gamma': config['model']['sigma_data']**-2,
+            'gamma': merged['model']['sigma_data']**-2,
             # NOTE: the following may be a more correct/variance-aware configuration (it's a soft version of variance-aware min-snr).
             # 'snr_adjust_for_sigma_data': True,
             # 'gamma_adjust_for_sigma_data': True,
