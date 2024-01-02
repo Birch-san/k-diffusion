@@ -3,7 +3,10 @@ import k_diffusion as K
 from typing import Dict, Any, List
 from dataclasses import dataclass
 from k_diffusion.models import ImageTransformerDenoiserModelV2
-from k_diffusion.layers import Denoiser
+# from k_diffusion.layers import Denoiser
+from kdiff_trainer.flops.hook_flops import instrument_ffn_flops
+from k_diffusion.models.flops import FlopCounter
+from torch.cuda.amp.autocast_mode import autocast
 from math import log
 
 @dataclass
@@ -72,6 +75,7 @@ def main():
     head_dim = 64
     kernel_size = 7
     kernel_area = kernel_size**2
+    batch_size = 1
 
     local_levels: int = compute_levels_local(
         max_res_area = max_res_area,
@@ -94,14 +98,15 @@ def main():
     ffn_flops_predicted: int = compute_ffn_flops(
         max_res_area = max_res_area,
         model_dim = model_base_dim,
-        min_res_area = 16**2,
-        depth_outer = 2,
-        depth_inner = 2,
-        batch_size = 1,
-        ffn_multiple = 3,
-        ingress_patch_area = 4**2,
-        merge_patch_area = 2**2,
+        min_res_area = min_res_area,
+        depth_outer = depth_outer,
+        depth_inner = depth_inner,
+        batch_size = batch_size,
+        ffn_multiple = ffn_multiple,
+        ingress_patch_area = ingress_patch_area,
+        merge_patch_area = merge_patch_area,
     )
+    print(f'[theorised] ffn GFLOPs: {ffn_flops_predicted / 1_000_000_000:,.3f}')
 
     depths: List[int] = [
         *[depth_outer]*(total_levels-1),
@@ -135,8 +140,19 @@ def main():
     }
     config: Dict[str, Any] = K.config.load_config(config_nominal)
 
-    inner_model: ImageTransformerDenoiserModelV2 = K.config.make_model(config)#.eval().to(device, dtype=torch.bfloat16)
-    model: Denoiser = K.config.make_denoiser_wrapper(config)(inner_model)
+    inner_model: ImageTransformerDenoiserModelV2 = K.config.make_model(config).eval().to(device)
+    # model: Denoiser = K.config.make_denoiser_wrapper(config)(inner_model)
+    ffn_counter = FlopCounter()
+    instrument_ffn_flops(ffn_counter, inner_model)
+    with torch.inference_mode(), autocast(dtype=torch.bfloat16):
+        x = torch.zeros([batch_size, model_config['input_channels'], *model_config['input_size']], device=device)
+        sigma = torch.ones([batch_size], device=device)
+        extra_args = {}
+        if getattr(inner_model, "num_classes", 0):
+            extra_args['class_cond'] = torch.zeros([batch_size], dtype=torch.long, device=device)
+        inner_model.forward(x, sigma, **extra_args)
+
+    print(f' [measured] ffn GFLOPs: {ffn_counter.flops / 1_000_000_000:,.3f}')
     pass
 
 if __name__ == '__main__':
