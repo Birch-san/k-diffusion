@@ -54,14 +54,17 @@ def compute_ffn_flops(
         ingress_patch_area = ingress_patch_area,
         merge_patch_area = merge_patch_area,
     )
-    level_token_quotients: List[int] = [merge_patch_area ** l for l in range(1, levels_total + 1)]
+    # instead of range(1, levels_total+1) (as per the paper draft),
+    # setting this to range(1, levels_total) seems to give us a consistent
+    # ratio of 4/3 between theory and practice, which seems like a step in the right direction
+    level_token_quotients: List[int] = [merge_patch_area ** l for l in range(1, levels_total)]
     level_token_quotient_sum: int = sum(level_token_quotients)
     return 4 * ffn_multiple * batch_size * model_dim**2 * min_res_area * (2 * depth_outer * level_token_quotient_sum + depth_inner)
 
 def main():
     device=torch.device('cuda')
 
-    max_res_side = 256
+    max_res_side = 512
     ingress_patch_side = 4
     ingress_patch_area = ingress_patch_side**2
     merge_patch_area = 2**2
