@@ -213,6 +213,28 @@ class AdaLN(nn.Module):
         return NormScale(x, gate)
 
 
+# (for debugging) replaces the RMSNorm of AdaRMSNorm with a LayerNorm
+class AdaLNGateless(nn.Module):
+    def __init__(self, features: int, cond_features: int, eps=1e-6, new_dims=2):
+        super().__init__()
+        self.norm = nn.LayerNorm(features, elementwise_affine=False, eps=eps)
+        self.linear = apply_wd(zero_init(Linear(cond_features, 2 * features, bias=True)))
+        self.mod = nn.Sequential(
+            nn.SiLU(),
+            self.linear,
+        )
+        tag_module(self.linear, "mapping")
+        self.new_dims = new_dims
+
+    def extra_repr(self):
+        return f"eps={self.eps},"
+
+    def forward(self, x: FloatTensor, cond: FloatTensor) -> FloatTensor:
+        shift, scale = self.mod(cond).chunk(2, dim=1)
+        x = modulate(self.norm(x), shift, scale, new_dims=self.new_dims)
+        return x
+
+
 # Rotary position embeddings
 
 @flags.compile_wrap
@@ -448,13 +470,18 @@ def use_flash_2(x):
     return True
 
 
+NormType = Literal['AdaRMS', 'AdaLN', 'AdaLNGateless']
+
+
 class SelfAttentionBlock(nn.Module):
-    def __init__(self, d_model, d_head, cond_features, dropout=0.0, use_rope=True, norm_type: Literal['AdaRMS', 'AdaLN'] = 'AdaRMS', qkv_bias=False, o_bias=False):
+    def __init__(self, d_model, d_head, cond_features, dropout=0.0, use_rope=True, norm_type: NormType = 'AdaRMS', qkv_bias=False, o_bias=False):
         super().__init__()
         self.d_head = d_head
         self.n_heads = d_model // d_head
         if norm_type == 'AdaRMS':
             self.norm = AdaRMSNorm(d_model, cond_features)
+        elif norm_type == 'AdaLNGateless':
+            self.norm = AdaLNGateless(d_model, cond_features)
         elif norm_type == 'AdaLN':
             self.norm_scale = AdaLN(d_model, cond_features)
         else:
@@ -510,13 +537,15 @@ class SelfAttentionBlock(nn.Module):
 
 
 class NeighborhoodSelfAttentionBlock(nn.Module):
-    def __init__(self, d_model, d_head, cond_features, kernel_size, dropout=0.0, use_rope=True, norm_type: Literal['AdaRMS', 'AdaLN'] = 'AdaRMS', qkv_bias=False, o_bias=False):
+    def __init__(self, d_model, d_head, cond_features, kernel_size, dropout=0.0, use_rope=True, norm_type: NormType = 'AdaRMS', qkv_bias=False, o_bias=False):
         super().__init__()
         self.d_head = d_head
         self.n_heads = d_model // d_head
         self.kernel_size = kernel_size
         if norm_type == 'AdaRMS':
             self.norm = AdaRMSNorm(d_model, cond_features)
+        elif norm_type == 'AdaLNGateless':
+            self.norm = AdaLNGateless(d_model, cond_features)
         elif norm_type == 'AdaLN':
             self.norm_scale = AdaLN(d_model, cond_features)
         else:
@@ -573,7 +602,7 @@ class NeighborhoodSelfAttentionBlock(nn.Module):
 
 
 class ShiftedWindowSelfAttentionBlock(nn.Module):
-    def __init__(self, d_model, d_head, cond_features, window_size, window_shift, dropout=0.0, use_rope=True, norm_type: Literal['AdaRMS', 'AdaLN'] = 'AdaRMS', qkv_bias=False, o_bias=False):
+    def __init__(self, d_model, d_head, cond_features, window_size, window_shift, dropout=0.0, use_rope=True, norm_type: NormType = 'AdaRMS', qkv_bias=False, o_bias=False):
         super().__init__()
         self.d_head = d_head
         self.n_heads = d_model // d_head
@@ -581,6 +610,8 @@ class ShiftedWindowSelfAttentionBlock(nn.Module):
         self.window_shift = window_shift
         if norm_type == 'AdaRMS':
             self.norm = AdaRMSNorm(d_model, cond_features)
+        elif norm_type == 'AdaLNGateless':
+            self.norm = AdaLNGateless(d_model, cond_features)
         elif norm_type == 'AdaLN':
             self.norm_scale = AdaLN(d_model, cond_features)
         else:
@@ -622,13 +653,15 @@ class ShiftedWindowSelfAttentionBlock(nn.Module):
 
 class CrossAttentionBlock(nn.Module):
     qk_scale: Optional[nn.Parameter]
-    def __init__(self, d_model: int, d_cross: int, d_head: int, cond_features: int, scale_qk: bool, dropout=0., norm_type: Literal['AdaRMS', 'AdaLN'] = 'AdaRMS', q_bias=False, kv_bias=False, o_bias=False):
+    def __init__(self, d_model: int, d_cross: int, d_head: int, cond_features: int, scale_qk: bool, dropout=0., norm_type: NormType = 'AdaRMS', q_bias=False, kv_bias=False, o_bias=False):
         super().__init__()
         self.d_head = d_head
         self.dropout = dropout
         self.n_heads = d_model // d_head
         if norm_type == 'AdaRMS':
             self.norm = AdaRMSNorm(d_model, cond_features)
+        elif norm_type == 'AdaLNGateless':
+            self.norm = AdaLNGateless(d_model, cond_features)
         elif norm_type == 'AdaLN':
             self.norm_scale = AdaLN(d_model, cond_features)
         else:
@@ -670,10 +703,12 @@ class CrossAttentionBlock(nn.Module):
 
 
 class FeedForwardBlock(nn.Module):
-    def __init__(self, d_model, d_ff, cond_features, dropout=0.0, up_proj_type=LinearGEGLU, up_bias=False, down_bias=False, norm_type: Literal['AdaRMS', 'AdaLN'] = 'AdaRMS'):
+    def __init__(self, d_model, d_ff, cond_features, dropout=0.0, up_proj_type=LinearGEGLU, up_bias=False, down_bias=False, norm_type: NormType = 'AdaRMS'):
         super().__init__()
         if norm_type == 'AdaRMS':
             self.norm = AdaRMSNorm(d_model, cond_features)
+        elif norm_type == 'AdaLNGateless':
+            self.norm = AdaLNGateless(d_model, cond_features)
         elif norm_type == 'AdaLN':
             self.norm_scale = AdaLN(d_model, cond_features)
         else:
@@ -700,7 +735,7 @@ class FeedForwardBlock(nn.Module):
 
 
 class GlobalTransformerLayer(nn.Module):
-    def __init__(self, d_model, d_ff, d_head, cond_features, cross_attn: Optional[CrossAttentionBlock] = None, dropout=0.0, up_proj_type=LinearGEGLU, use_rope=True, ffn_up_bias=False, ffn_down_bias=False, norm_type: Literal['AdaRMS', 'AdaLN'] = 'AdaRMS', qkv_bias=False, o_bias=False):
+    def __init__(self, d_model, d_ff, d_head, cond_features, cross_attn: Optional[CrossAttentionBlock] = None, dropout=0.0, up_proj_type=LinearGEGLU, use_rope=True, ffn_up_bias=False, ffn_down_bias=False, norm_type: NormType = 'AdaRMS', qkv_bias=False, o_bias=False):
         super().__init__()
         self.self_attn = SelfAttentionBlock(d_model, d_head, cond_features, dropout=dropout, use_rope=use_rope, norm_type=norm_type, qkv_bias=qkv_bias, o_bias=o_bias)
         self.cross_attn = cross_attn
@@ -715,7 +750,7 @@ class GlobalTransformerLayer(nn.Module):
 
 
 class NeighborhoodTransformerLayer(nn.Module):
-    def __init__(self, d_model, d_ff, d_head, cond_features, kernel_size, cross_attn: Optional[CrossAttentionBlock] = None, dropout=0.0, up_proj_type=LinearGEGLU, use_rope=True, ffn_up_bias=False, ffn_down_bias=False, norm_type: Literal['AdaRMS', 'AdaLN'] = 'AdaRMS', qkv_bias=False, o_bias=False):
+    def __init__(self, d_model, d_ff, d_head, cond_features, kernel_size, cross_attn: Optional[CrossAttentionBlock] = None, dropout=0.0, up_proj_type=LinearGEGLU, use_rope=True, ffn_up_bias=False, ffn_down_bias=False, norm_type: NormType = 'AdaRMS', qkv_bias=False, o_bias=False):
         super().__init__()
         self.self_attn = NeighborhoodSelfAttentionBlock(d_model, d_head, cond_features, kernel_size, dropout=dropout, use_rope=use_rope, norm_type=norm_type, qkv_bias=qkv_bias, o_bias=o_bias)
         self.cross_attn = cross_attn
@@ -730,7 +765,7 @@ class NeighborhoodTransformerLayer(nn.Module):
 
 
 class ShiftedWindowTransformerLayer(nn.Module):
-    def __init__(self, d_model, d_ff, d_head, cond_features, window_size, index, cross_attn: Optional[CrossAttentionBlock] = None, dropout=0.0, up_proj_type=LinearGEGLU, use_rope=True, ffn_up_bias=False, ffn_down_bias=False, norm_type: Literal['AdaRMS', 'AdaLN'] = 'AdaRMS', qkv_bias=False, o_bias=False):
+    def __init__(self, d_model, d_ff, d_head, cond_features, window_size, index, cross_attn: Optional[CrossAttentionBlock] = None, dropout=0.0, up_proj_type=LinearGEGLU, use_rope=True, ffn_up_bias=False, ffn_down_bias=False, norm_type: NormType = 'AdaRMS', qkv_bias=False, o_bias=False):
         super().__init__()
         window_shift = window_size // 2 if index % 2 == 1 else 0
         self.self_attn = ShiftedWindowSelfAttentionBlock(d_model, d_head, cond_features, window_size, window_shift, dropout=dropout, use_rope=use_rope, norm_type=norm_type, qkv_bias=qkv_bias, o_bias=o_bias)
@@ -746,7 +781,7 @@ class ShiftedWindowTransformerLayer(nn.Module):
 
 
 class NoAttentionTransformerLayer(nn.Module):
-    def __init__(self, d_model, d_ff, cond_features, dropout=0.0, up_proj_type=LinearGEGLU, ffn_up_bias=False, ffn_down_bias=False, norm_type: Literal['AdaRMS', 'AdaLN'] = 'AdaRMS'):
+    def __init__(self, d_model, d_ff, cond_features, dropout=0.0, up_proj_type=LinearGEGLU, ffn_up_bias=False, ffn_down_bias=False, norm_type: NormType = 'AdaRMS'):
         super().__init__()
         self.ff = FeedForwardBlock(d_model, d_ff, cond_features, dropout=dropout, up_proj_type=up_proj_type, up_bias=ffn_up_bias, down_bias=ffn_down_bias, norm_type=norm_type)
 
@@ -899,7 +934,7 @@ class MappingSpec:
 # Model class
 
 class ImageTransformerDenoiserModelV2(nn.Module):
-    def __init__(self, levels: Sequence[LevelSpec], mapping: MappingSpec, in_channels, out_channels, patch_size, num_classes=0, mapping_cond_dim=0, up_proj_act: Literal["GELU", "GEGLU"] = "GEGLU", pos_emb_type: Literal["ROPE", "additive"] = "ROPE", input_size: Optional[Union[int, Tuple[int, int]]] = None, ffn_up_bias=False, ffn_down_bias=False, backbone_skip_type: Literal['learned_lerp', 'add', 'concat'] = 'learned_lerp', norm_type: Literal['AdaRMS', 'AdaLN'] = 'AdaRMS', qkv_bias=False, o_bias=False):
+    def __init__(self, levels: Sequence[LevelSpec], mapping: MappingSpec, in_channels, out_channels, patch_size, num_classes=0, mapping_cond_dim=0, up_proj_act: Literal["GELU", "GEGLU"] = "GEGLU", pos_emb_type: Literal["ROPE", "additive"] = "ROPE", input_size: Optional[Union[int, Tuple[int, int]]] = None, ffn_up_bias=False, ffn_down_bias=False, backbone_skip_type: Literal['learned_lerp', 'add', 'concat'] = 'learned_lerp', norm_type: NormType = 'AdaRMS', qkv_bias=False, o_bias=False):
         super().__init__()
         self.num_classes = num_classes
 
