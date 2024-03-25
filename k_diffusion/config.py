@@ -64,6 +64,7 @@ def load_config(path_or_dict: Union[str, Dict], use_json5=False):
             'mapping_cond_dim': 0,
             'mapping_dropout_rate': 0.,
             'mapping_ffn_up_bias': False,
+            'mapping_ffn_down_bias': False,
             'd_ffs': None,
             'self_attns': None,
             'dropout_rate': None,
@@ -73,8 +74,11 @@ def load_config(path_or_dict: Union[str, Dict], use_json5=False):
             'up_proj_act': 'GEGLU',
             'pos_emb_type': 'ROPE',
             'ffn_up_bias': False,
+            'ffn_down_bias': False,
             'backbone_skip_type': 'learned_lerp',
             'norm_type': 'AdaRMS',
+            'qkv_bias': False,
+            'o_bias': False,
         },
         'optimizer': {
             'type': 'adamw',
@@ -277,7 +281,7 @@ def make_model(config):
                     dropout=xattn_dropout,
                 )
             levels.append(models.image_transformer_v2.LevelSpec(depth, width, d_ff, self_attn, cross_attn_spec, dropout))
-        mapping = models.image_transformer_v2.MappingSpec(config['mapping_depth'], config['mapping_width'], config['mapping_d_ff'], config['mapping_dropout_rate'], config['mapping_ffn_up_bias'])
+        mapping = models.image_transformer_v2.MappingSpec(config['mapping_depth'], config['mapping_width'], config['mapping_d_ff'], config['mapping_dropout_rate'], config['mapping_ffn_up_bias'], config['mapping_ffn_down_bias'])
         model = models.ImageTransformerDenoiserModelV2(
             levels=levels,
             mapping=mapping,
@@ -290,8 +294,11 @@ def make_model(config):
             pos_emb_type=config["pos_emb_type"],
             input_size=config['input_size'],
             ffn_up_bias=config['ffn_up_bias'],
+            ffn_down_bias=config['ffn_down_bias'],
             backbone_skip_type=config['backbone_skip_type'],
             norm_type=config['norm_type'],
+            qkv_bias=config['qkv_bias'],
+            o_bias=config['o_bias'],
         )
     elif config['type'] == 'dit':
         from .models.dit import DiT_models
