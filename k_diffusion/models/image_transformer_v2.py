@@ -492,7 +492,12 @@ class SelfAttentionBlock(nn.Module):
         if self.use_rope:
             self.pos_emb = AxialRoPE(d_head // 2, self.n_heads)
         self.dropout = nn.Dropout(dropout)
-        self.out_proj = apply_wd(zero_init(Linear(d_model, d_model, bias=o_bias)))
+        out_proj = Linear(d_model, d_model, bias=o_bias)
+        # we usually zero-init out_proj,
+        # but in the case of AdaLN we mustn't, as we already multiply by a zero-inited gate_scale
+        if norm_type != 'AdaLN':
+            out_proj = zero_init(out_proj)
+        self.out_proj = apply_wd(out_proj)
 
     def extra_repr(self):
         return f"d_head={self.d_head},"
@@ -556,7 +561,12 @@ class NeighborhoodSelfAttentionBlock(nn.Module):
         if self.use_rope:
             self.pos_emb = AxialRoPE(d_head // 2, self.n_heads)
         self.dropout = nn.Dropout(dropout)
-        self.out_proj = apply_wd(zero_init(Linear(d_model, d_model, bias=o_bias)))
+        out_proj = Linear(d_model, d_model, bias=o_bias)
+        # we usually zero-init out_proj,
+        # but in the case of AdaLN we mustn't, as we already multiply by a zero-inited gate_scale
+        if norm_type != 'AdaLN':
+            out_proj = zero_init(out_proj)
+        self.out_proj = apply_wd(out_proj)
 
     def extra_repr(self):
         return f"d_head={self.d_head}, kernel_size={self.kernel_size}"
@@ -611,7 +621,12 @@ class ShiftedWindowSelfAttentionBlock(nn.Module):
         if self.use_rope:
             self.pos_emb = AxialRoPE(d_head // 2, self.n_heads)
         self.dropout = nn.Dropout(dropout)
-        self.out_proj = apply_wd(zero_init(Linear(d_model, d_model, bias=o_bias)))
+        out_proj = Linear(d_model, d_model, bias=o_bias)
+        # we usually zero-init out_proj,
+        # but in the case of AdaLN we mustn't, as we already multiply by a zero-inited gate_scale
+        if norm_type != 'AdaLN':
+            out_proj = zero_init(out_proj)
+        self.out_proj = apply_wd(out_proj)
 
     def extra_repr(self):
         return f"d_head={self.d_head}, window_size={self.window_size}, window_shift={self.window_shift}"
@@ -660,7 +675,12 @@ class CrossAttentionBlock(nn.Module):
         self.kv_proj = apply_wd(Linear(d_cross, d_model * 2, bias=kv_bias))
         self.dropout = nn.Dropout(dropout)
         self.qk_scale = nn.Parameter(torch.full([self.n_heads], 10.0)) if scale_qk else None
-        self.out_proj = apply_wd(zero_init(Linear(d_model, d_model, bias=o_bias)))
+        out_proj = Linear(d_model, d_model, bias=o_bias)
+        # we usually zero-init out_proj,
+        # but in the case of AdaLN we mustn't, as we already multiply by a zero-inited gate_scale
+        if norm_type != 'AdaLN':
+            out_proj = zero_init(out_proj)
+        self.out_proj = apply_wd(out_proj)
 
     def extra_repr(self):
         return f"d_head={self.d_head},"
@@ -705,7 +725,12 @@ class FeedForwardBlock(nn.Module):
         # TODO swap here
         self.up_proj = apply_wd(up_proj_type(d_model, d_ff, bias=up_bias))
         self.dropout = nn.Dropout(dropout)
-        self.down_proj = apply_wd(zero_init(Linear(d_ff, d_model, bias=down_bias)))
+        down_proj = Linear(d_ff, d_model, bias=down_bias)
+        # we usually zero-init down_proj,
+        # but in the case of AdaLN we mustn't, as we already multiply by a zero-inited gate_scale
+        if norm_type != 'AdaLN':
+            down_proj = zero_init(down_proj)
+        self.down_proj = apply_wd(down_proj)
 
     def forward(self, x, cond):
         skip = x
