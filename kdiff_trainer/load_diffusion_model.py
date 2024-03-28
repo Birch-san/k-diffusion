@@ -8,6 +8,8 @@ from guided_diffusion import script_util
 from guided_diffusion.unet import UNetModel
 from guided_diffusion.respace import SpacedDiffusion
 
+from k_diffusion.models.guided_diff_flops import instrument_gdiff_flops
+
 class ModelAndDiffusion(NamedTuple):
     model: UNetModel
     diffusion: SpacedDiffusion
@@ -36,6 +38,7 @@ def wrap_diffusion_model(
     device="cpu",
     model_type: Literal['eps', 'v'] = "eps"
 ):
+    instrument_gdiff_flops(model)
     if model_type == "eps":
         return K.external.OpenAIDenoiser(model, diffusion, device=device)
     elif model_type == "v":

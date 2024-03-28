@@ -1,11 +1,11 @@
-from torch.nn import Module, Linear
+from torch.nn import Module, Linear, Conv2d
 from timm.models.vision_transformer import Attention
 from torch import FloatTensor
 from typing import Tuple
 
 from . import flops
 from ..external import DiTDenoiser
-from .flops import hook_linear_flops
+from .flops import hook_linear_flops, hook_conv2d_flops
 
 
 def hook_attn_flops(attn: Attention, args: Tuple[FloatTensor, ...], _):
@@ -20,6 +20,9 @@ def hook_attn_flops(attn: Attention, args: Tuple[FloatTensor, ...], _):
 def instrument_module(module: Module):
     if isinstance(module, Linear):
         module.register_forward_hook(hook_linear_flops)
+    # TODO: check correctness
+    if isinstance(module, Conv2d):
+        module.register_forward_hook(hook_conv2d_flops)
     elif isinstance(module, Attention):
         module.register_forward_hook(hook_attn_flops)
 
