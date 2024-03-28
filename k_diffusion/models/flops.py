@@ -1,7 +1,7 @@
 from contextlib import contextmanager
 import math
 import threading
-from torch.nn import Linear
+from torch.nn import Linear, Conv1d, Conv2d
 from torch import FloatTensor
 from typing import Tuple
 
@@ -57,5 +57,15 @@ def op_natten(q, k, v, kernel_size):
     return math.prod(q_rest) * (d_q + d_v) * kernel_size**2
 
 def hook_linear_flops(module: Linear, args: Tuple[FloatTensor, ...], _):
+    x, *_ = args
+    op(op_linear, x.shape, module.weight.shape)
+
+# TODO: check correctness
+def hook_conv1d_flops(module: Conv1d, args: Tuple[FloatTensor, ...], _):
+    x, *_ = args
+    op(op_linear, x.shape, module.weight.shape)
+
+# TODO: check correctness (even more so)
+def hook_conv2d_flops(module: Conv2d, args: Tuple[FloatTensor, ...], _):
     x, *_ = args
     op(op_linear, x.shape, module.weight.shape)

@@ -322,7 +322,11 @@ def main():
 
     if do_train:
         lr = opt_config['lr'] if args.lr is None else args.lr
-        groups = inner_model.param_groups(lr)
+        if guided_diff is None:
+            groups = inner_model.param_groups(lr)
+        else:
+            groups = [{"params": list(inner_model.parameters()), "lr": lr}]
+            print('WARN: using placeholder param groups to train guided diffusion UNet. you probably want to be more discerning than this with where you apply weight decay. these placeholders are only intended to unblock you when it comes to testing a single training step.')
         # for FSDP support: models must be prepared separately and before optimizers
         inner_model, inner_model_ema = accelerator.prepare(inner_model, inner_model_ema)
         if opt_config['type'] == 'adamw':
