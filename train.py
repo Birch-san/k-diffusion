@@ -36,7 +36,6 @@ from itertools import islice
 from tqdm import tqdm
 import numpy as np
 import gc
-from torch.utils.flop_counter import FlopCounterMode
 
 import k_diffusion as K
 from kdiff_trainer.dimensions import Dimensions
@@ -485,7 +484,9 @@ def main():
         class_cond_key = 'y'
     
     if args.use_torch_flop_counter:
-        cfc = FlopCounterMode()
+        from k_diffusion.models.flops_to_macs import custom_mapping as flos_to_macs_mappings
+        from torch.utils.flop_counter import FlopCounterMode
+        cfc = FlopCounterMode(custom_mapping=flos_to_macs_mappings)
     else:
         cfc = None
     with torch.no_grad(), K.models.flops.flop_counter() as fc, nullcontext() if cfc is None else cfc:
