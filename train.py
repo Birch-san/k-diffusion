@@ -36,6 +36,7 @@ from itertools import islice
 from tqdm import tqdm
 import numpy as np
 import gc
+from torch.utils.flop_counter import FlopCounterMode
 
 import k_diffusion as K
 from kdiff_trainer.dimensions import Dimensions
@@ -201,6 +202,8 @@ def main():
                    help="[when --input-size-override is specified] for each power-of-2 by which the 'override' input size exceeds the config-specified input size, grow the model by duplicating its shallowest level. intended only as a convenient way of measuring how the model's FLOPs *and parameter count* scale with input size, under a 'duplicate shallowest level' scheme for growing the model. for image_transformer_v2 models only.")
     p.add_argument('--use-x0-loss', action='store_true',
                    help="compute loss in x0-space, i.e. mse(denoised, reals) rather than via the EDM formulation mse(model_output, effective_target). this feature is intended only for verifying whether EDM loss weightings give the same results as corresponding x0 loss weightings.")
+    p.add_argument('--use-torch-flop-counter', action='store_true',
+                   help="additionally enable torch FLOP counter. off by default, because this is fairly recent torch functionality, and because failure to instrument FLOPs can lead to unhandled divide-by-zero when tabulating results.")
     p.add_argument('--log-dataset-distribution', action='store_true',
                    help="Measure/log how close the dataset is to a standard Gaussian. this feature is intended for verifying that you have configured a sane scale-and-shift, or for comparing latent scale-and-shifts against the official SD/SDXL VAE scale factor")
     args = p.parse_args()
@@ -481,7 +484,11 @@ def main():
             model_ema.requires_grad_(False).eval()
         class_cond_key = 'y'
     
-    with torch.no_grad(), K.models.flops.flop_counter() as fc:
+    if args.use_torch_flop_counter:
+        cfc = FlopCounterMode()
+    else:
+        cfc = None
+    with torch.no_grad(), K.models.flops.flop_counter() as fc, nullcontext() if cfc is None else cfc:
         x = torch.zeros([1, model_config['input_channels'], size[0], size[1]], device=device)
         sigma = torch.ones([1], device=device)
         extra_args = {}
@@ -489,7 +496,14 @@ def main():
             extra_args[class_cond_key] = torch.zeros([1], dtype=torch.long, device=device)
         (inner_model or inner_model_ema)(x, sigma, **extra_args)
         if accelerator.is_main_process:
-            print(f"Forward pass GFLOPs: {fc.flops / 1_000_000_000:,.3f} for {args.config}", flush=True)
+            k_flops = fc.flops
+            print(f"[K] Forward pass GFLOPs: {k_flops / 1_000_000_000:,.3f} ({k_flops}) for {args.config} at image size {model_config['input_size'][0]}", flush=True)
+    if args.use_torch_flop_counter:
+        c_flops = sum(cfc.get_flop_counts()['Global'].values())
+        if accelerator.is_main_process:
+            print(f"[C] Forward pass GFLOPs: {c_flops / 1_000_000_000:,.3f} ({c_flops}) for {args.config} at image size {model_config['input_size'][0]}", flush=True)
+            # newline = '\n'
+            # print(f"Unsupported ops:\n{newline.join(cfc.unsupport)}")
 
     if args.output_to_subdir:
         run_root = f'{args.out_root}/{args.name}'
