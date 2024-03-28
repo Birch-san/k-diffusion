@@ -3,7 +3,7 @@ import math
 import threading
 from torch.nn import Linear, Conv1d, Conv2d
 from torch import FloatTensor
-from typing import Tuple
+from typing import Tuple, List
 
 
 state = threading.local()
@@ -60,12 +60,23 @@ def hook_linear_flops(module: Linear, args: Tuple[FloatTensor, ...], _):
     x, *_ = args
     op(op_linear, x.shape, module.weight.shape)
 
-# TODO: check correctness
-def hook_conv1d_flops(module: Conv1d, args: Tuple[FloatTensor, ...], _):
-    x, *_ = args
-    op(op_linear, x.shape, module.weight.shape)
+def conv_flop_count_(
+    x_shape: List[int],
+    w_shape: List[int],
+    out_shape: List[int],
+    transposed: bool = False,
+) -> int:
+    from torch.utils.flop_counter import conv_flop_count
+    # torch counts multiplies *and* adds
+    flos: int = conv_flop_count(x_shape, w_shape, out_shape, transposed=transposed)
+    # OpenAI guided diffusion paper reported multiply-accumulates, not conventional FLOs
+    macs: int = flos // 2
+    return macs
 
-# TODO: check correctness (even more so)
-def hook_conv2d_flops(module: Conv2d, args: Tuple[FloatTensor, ...], _):
+def hook_conv1d_flops(module: Conv1d, args: Tuple[FloatTensor, ...], out: FloatTensor):
     x, *_ = args
-    op(op_linear, x.shape, module.weight.shape)
+    op(conv_flop_count_, x.shape, module.weight.shape, out.shape)
+
+def hook_conv2d_flops(module: Conv2d, args: Tuple[FloatTensor, ...], out: FloatTensor):
+    x, *_ = args
+    op(conv_flop_count_, x.shape, module.weight.shape, out.shape)
