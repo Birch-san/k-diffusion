@@ -30,7 +30,7 @@ from tqdm.auto import tqdm
 from typing import Any, List, Optional, Union, Protocol
 from PIL import Image
 from dataclasses import dataclass
-from typing import Optional, TypedDict, Generator, Callable, Literal, Dict, Any
+from typing import Optional, TypedDict, Generator, Callable, Literal, Dict, Any, Protocol
 from contextlib import nullcontext
 from itertools import islice
 from tqdm import tqdm
@@ -87,6 +87,9 @@ class Sampler(Protocol):
     @staticmethod
     def __call__(model_fn: Callable, x: FloatTensor, sigmas: FloatTensor, extra_args: Dict[str, Any]) -> Any: ...
 
+class ShardWriterProto(Protocol):
+    def write(self, obj: Dict[str, Any]) -> None: ...
+
 def ensure_distributed():
     if not dist.is_initialized():
         dist.init_process_group(world_size=1, rank=0, store=dist.HashStore())
@@ -142,8 +145,12 @@ def main():
                    help='run demo sample instead of training')
     p.add_argument('--inference-n', type=int, default=None,
                    help='[in inference-only mode] the number of samples to generate in total (in batches of up to --sample-n)')
-    p.add_argument('--inference-out-wds-root', type=str, default=None,
+    p.add_argument('--inference-out-target', type=str, default='grid', choices=['grid', 'wds', 'imgdir'],
+                   help='[in inference-only mode] how to output images ("grid": single demo grid (like during training) with labels. "imgdir": directory of WDS .tar files. "imgdir": directory of .pngs)')
+    p.add_argument('--inference-out-root', type=str, default=None,
                    help='[in inference-only mode] directory into which to output WDS .tar files')
+    p.add_argument('--inference-out-wds-root', type=str, default=None,
+                   help='(deprecated) please instead use --inference-out-target wds --inference-out-root [dir] to specify directory into which to output WDS .tar files')
     p.add_argument('--inference-out-wds-shard', type=int, default=None,
                    help="[in inference-only mode] the directory within the WDS dataset .tar to place each sample. this enables you to prevent key clashes if you were to tell multiple nodes to independently produce .tars and collect them together into a single dataset afterward (poor man's version of multi-node support).")
     p.add_argument('--lr', type=float,
@@ -217,6 +224,16 @@ def main():
     do_train: bool = not args.evaluate_only and not args.inference_only
     if args.inference_only and args.evaluate_only:
         raise ValueError('Cannot fulfil both --inference-only and --evaluate-only; they are mutually-exclusive')
+    
+    if args.inference_out_wds_root is not None:
+        raise ValueError('You have specified the deprecated option --inference-out-wds-root. Please instead use --inference-out-target wds --inference-out-root [dir] to specify directory into which to output WDS .tar files')
+
+    if args.inference_out_target in ['wds', 'imgdir']:
+        # not required for --inference-out-target grid, which mimics the trainer's demo grids and consequently outputs to default trainer output location too.
+        # the other modes don't output to default location as you may have other training artifacts there, which may result in a folder with more than just images inside it
+        assert args.inference_out_root is not None, f"please specify --inference-out-root (required by --inference-out-target {args.inference_out_target})."
+    elif args.inference_out_target == 'grid':
+        assert args.inference_n is None, "grid mode outputs only one grid (containing --sample-n images), and does not use --inference-n. Other modes use --inference-n to specify the total image count over multiple batches of --sample-n."
 
     # use json5 parser if we wish to load .jsonc (commented) config
     config = K.config.load_config(args.config, use_json5=args.config.endswith('.jsonc'))
@@ -904,37 +921,39 @@ def main():
                 print('WARN: you have enabled uncond samples to be generated (--demo-classcond-include-uncond), and you are in --inference-only mode. if you are using this mode for demo purposes this can be reasonable. but if you are using this mode for purposes of computing FID: you will not want a mixture of cond and uncond samples.')
         if args.sample_n < 1:
             raise ValueError('--inference-only requested but --sample-n is less than 1')
-        if (args.inference_n is None) != (args.inference_out_wds_root is None):
-            # this mutual-presence requirement could be relaxed if we were to implement other ways of outputting many images (e.g. folder-of-images)
-            # but the only current use-case for "inference more samples than we can fit in a batch" is for _making datasets_, which may as well be WDS.
-            raise ValueError('--inference-n and --inference-out-wds-root must both be provided if either are provided.')
-        if args.inference_n is None:
+        if args.inference_out_target == 'grid':
             demo(captioner)
         else:
+            assert args.inference_out_target in ['wds', 'imgdir']
             samples = islice(generate_samples(), args.inference_n)
             if accelerator.is_main_process:
-                from webdataset import ShardWriter
-                makedirs(args.inference_out_wds_root, exist_ok=True)
-                sink_ctx = ShardWriter(f'{args.inference_out_wds_root}/%05d.tar', maxcount=10000)
-                shard_qualifier: Optional[str] = '' if args.inference_out_wds_shard is None else f'{args.inference_out_wds_shard}/'
-                if num_classes:
-                    def sink_sample(sink: ShardWriter, ix: int, sample: ClassConditionalSample) -> None:
-                        out: ClassCondSinkOutput = {
-                            '__key__': f'{shard_qualifier}{ix}',
-                            'img.png': sample.pil,
-                            'cls.txt': str(sample.class_cond),
-                        }
-                        sink.write(out)
-                else:
-                    def sink_sample(sink: ShardWriter, ix: int, sample: Sample) -> None:
-                        out: SinkOutput = {
-                            '__key__': f'{shard_qualifier}{ix}',
-                            'img.png': sample.pil,
-                        }
-                        sink.write(out)
+                makedirs(args.inference_out_root, exist_ok=True)
+                if args.inference_out_target == 'wds':
+                    from webdataset import ShardWriter
+                    sink_ctx = ShardWriter(f'{args.inference_out_root}/%05d.tar', maxcount=10000)
+                    shard_qualifier: Optional[str] = '' if args.inference_out_wds_shard is None else f'{args.inference_out_wds_shard}/'
+                    if num_classes:
+                        def sink_sample(sink: ShardWriter, ix: int, sample: ClassConditionalSample) -> None:
+                            out: ClassCondSinkOutput = {
+                                '__key__': f'{shard_qualifier}{ix}',
+                                'img.png': sample.pil,
+                                'cls.txt': str(sample.class_cond),
+                            }
+                            sink.write(out)
+                    else:
+                        def sink_sample(sink: ShardWriter, ix: int, sample: Sample) -> None:
+                            out: SinkOutput = {
+                                '__key__': f'{shard_qualifier}{ix}',
+                                'img.png': sample.pil,
+                            }
+                            sink.write(out)
+                elif args.inference_out_target == 'imgdir':
+                    sink_ctx = nullcontext()
+                    def sink_sample(_: None, ix: int, sample: Sample) -> None:
+                        sample.pil.save(f'{ix:05d}.png')
             else:
                 sink_ctx = nullcontext()
-                sink_sample: Callable[[Optional[ShardWriter], int, Sample], None] = lambda *_: ...
+                sink_sample: Callable[[Optional[ShardWriterProto], int, Sample], None] = lambda *_: ...
             # turns out there's a little bit of memory we can get back before we begin
             torch.cuda.empty_cache()
             with sink_ctx as sink:
