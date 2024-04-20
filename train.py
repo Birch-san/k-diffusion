@@ -149,6 +149,8 @@ def main():
                    help='[in inference-only mode] how to output images ("grid": single demo grid (like during training) with labels. "imgdir": directory of WDS .tar files. "imgdir": directory of .pngs)')
     p.add_argument('--inference-out-root', type=str, default=None,
                    help='[in inference-only mode] directory into which to output WDS .tar files')
+    p.add_argument('--inference-out-foreach-class', type=int, default=None, nargs='*',
+                   help='[in inference-only mode] generate --inference-n images per each of the specified class ids')
     p.add_argument('--inference-out-wds-root', type=str, default=None,
                    help='(deprecated) please instead use --inference-out-target wds --inference-out-root [dir] to specify directory into which to output WDS .tar files')
     p.add_argument('--inference-out-wds-shard', type=int, default=None,
@@ -227,6 +229,9 @@ def main():
     
     if args.inference_out_wds_root is not None:
         raise ValueError('You have specified the deprecated option --inference-out-wds-root. Please instead use --inference-out-target wds --inference-out-root [dir] to specify directory into which to output WDS .tar files')
+    
+    if args.inference_class is not None:
+        assert not args.goose_mode, "--goose-mode (which inferences class 99) conflicts with --inference-class (which inferences a list of specified classes). consider switching to --inference-class 99 --inference-out-target [wds or imgdir]"
 
     if args.inference_out_target in ['wds', 'imgdir']:
         # not required for --inference-out-target grid, which mimics the trainer's demo grids and consequently outputs to default trainer output location too.
@@ -691,7 +696,9 @@ def main():
             return cfg_model_fn
         return model
     
-    def generate_batch_of_samples() -> Samples:
+    def generate_batch_of_samples(
+        inference_class: Optional[int] = None,
+    ) -> Samples:
         n_per_proc = math.ceil(args.sample_n / accelerator.num_processes)
         x = torch.randn([accelerator.num_processes, n_per_proc, model_config['input_channels'], size[0], size[1]], generator=demo_gen).to(device)
         dist.broadcast(x, 0)
@@ -715,8 +722,9 @@ def main():
             extra_args = {**extra_args, **cfg_args.sampling_extra_args}
             model_fn = make_cfg_crossattn_model_fn(model_ema, masked_uncond=masked_uncond, cfg_scale=args.cfg_scale)
         elif num_classes:
-            if args.goose_mode:
-                class_cond = torch.full([accelerator.num_processes, n_per_proc], fill_value=99, dtype=torch.int64).to(device)
+            if args.goose_mode or inference_class is not None:
+                fill_value = 99 if inference_class is None else inference_class
+                class_cond = torch.full([accelerator.num_processes, n_per_proc], fill_value=fill_value, dtype=torch.int64).to(device)
             else:
                 class_cond = torch.randint(0, num_classes + maybe_uncond_class, [accelerator.num_processes, n_per_proc], generator=demo_gen).to(device)
             dist.broadcast(class_cond, 0)
@@ -739,15 +747,18 @@ def main():
     
     @torch.inference_mode() # note: inference_mode is lower-overhead than no_grad but disables forward-mode AD
     @K.utils.eval_mode(model_ema)
-    def generate_samples() -> Generator[Optional[Sample], None, None]:
+    def generate_samples(
+        sampling_tqdm_position: int,
+        inference_class: Optional[int],
+    ) -> Generator[Optional[Sample], None, None]:
         if accelerator.is_main_process:
             tqdm.write('Sampling...')
         with FSDP.summon_full_params(model_ema):
             pass
 
         while True:
-            with tqdm_environ(TqdmOverrides(position=1)):
-                batch: Samples = generate_batch_of_samples()
+            with tqdm_environ(TqdmOverrides(position=sampling_tqdm_position)):
+                batch: Samples = generate_batch_of_samples(inference_class=inference_class)
             # denormalization/scale-and-shift (such as for VAE) was already done inside generate_batch_of_samples()
             if is_latent:
                 # VAE decoder outputs a FloatTensor with range approx ±1
@@ -925,52 +936,88 @@ def main():
             demo(captioner)
         else:
             assert args.inference_out_target in ['wds', 'imgdir']
-            samples = islice(generate_samples(), args.inference_n)
+            has_inference_classes: bool = bool(args.inference_out_foreach_class)
+            inference_classes: List[Optional[int]] = args.inference_out_foreach_class if has_inference_classes else [None]
+            has_multiple_inference_classes: bool = len(inference_classes) > 1
+            batch_tqdm_position: Literal[0, 1] = int(has_multiple_inference_classes)
+            sampling_tqdm_position: Literal[1, 2] = batch_tqdm_position + 1
             if accelerator.is_main_process:
                 makedirs(args.inference_out_root, exist_ok=True)
                 if args.inference_out_target == 'wds':
                     from webdataset import ShardWriter
                     sink_ctx = ShardWriter(f'{args.inference_out_root}/%05d.tar', maxcount=10000)
-                    shard_qualifier: Optional[str] = '' if args.inference_out_wds_shard is None else f'{args.inference_out_wds_shard}/'
+                    shard_qualifier: str = '' if args.inference_out_wds_shard is None else f'{args.inference_out_wds_shard}/'
                     if num_classes:
-                        def sink_sample(sink: ShardWriter, ix: int, sample: ClassConditionalSample) -> None:
+                        def sink_sample(
+                            sink: ShardWriter,
+                            ix: int,
+                            sample: ClassConditionalSample,
+                            inference_class: Optional[int],
+                        ) -> None:
+                            key_dir: str = shard_qualifier if inference_class is None else f'{shard_qualifier}{inference_class}/'
                             out: ClassCondSinkOutput = {
-                                '__key__': f'{shard_qualifier}{ix}',
+                                '__key__': f'{key_dir}{ix}',
                                 'img.png': sample.pil,
                                 'cls.txt': str(sample.class_cond),
                             }
                             sink.write(out)
                     else:
-                        def sink_sample(sink: ShardWriter, ix: int, sample: Sample) -> None:
+                        def sink_sample(
+                            sink: ShardWriter,
+                            ix: int,
+                            sample: Sample,
+                            _: None,
+                        ) -> None:
                             out: SinkOutput = {
                                 '__key__': f'{shard_qualifier}{ix}',
                                 'img.png': sample.pil,
                             }
                             sink.write(out)
                 elif args.inference_out_target == 'imgdir':
+                    if has_inference_classes:
+                        for inference_class in inference_classes:
+                            makedirs(f'{args.inference_out_root}/{inference_class}', exist_ok=True)
                     sink_ctx = nullcontext()
-                    def sink_sample(_: None, ix: int, sample: Sample) -> None:
-                        sample.pil.save(f'{ix:05d}.png')
+                    def sink_sample(
+                        _: None,
+                        ix: int,
+                        sample: Sample,
+                        inference_class: Optional[int],
+                    ) -> None:
+                        img_out_dir: str = args.inference_out_root if inference_class is None else f'{args.inference_out_root}/{inference_class}'
+                        sample.pil.save(f'{img_out_dir}/{ix:05d}.png')
             else:
                 sink_ctx = nullcontext()
-                sink_sample: Callable[[Optional[ShardWriterProto], int, Sample], None] = lambda *_: ...
+                sink_sample: Callable[[Optional[ShardWriterProto], int, Sample, Optional[int]], None] = lambda *_: ...
             # turns out there's a little bit of memory we can get back before we begin
             torch.cuda.empty_cache()
             with sink_ctx as sink:
-                for batch_ix, batch in enumerate(tqdm(
-                    # collating into batches just to get a more reliable progress report from tqdm
-                    batched(samples, args.sample_n),
-                    'sampling batches',
+                inference_classes_it = tqdm(
+                    inference_classes,
+                    'batches per class',
                     disable=not accelerator.is_main_process,
                     position=0,
-                    total=math.ceil(args.inference_n/args.sample_n),
-                    unit='batch',
-                )):
-                    for ix, sample in enumerate(batch):
-                        corpus_ix: int = args.sample_n*batch_ix + ix
-                        sink_sample(sink, corpus_ix, sample)
-                    if accelerator.is_main_process:
-                        tqdm.write(f'batch {batch_ix} {torch.cuda.memory_allocated()/1024**2:.2f}MiB allocated, {torch.cuda.memory_reserved()/1024**2:.2f}MiB reserved of {torch.cuda.get_device_properties(0).total_memory/1024**2:.2f}MiB')
+                    unit='class',
+                ) if has_multiple_inference_classes else inference_classes
+                for inference_class in inference_classes_it:
+                    samples = islice(generate_samples(
+                        sampling_tqdm_position=sampling_tqdm_position,
+                        inference_class=inference_class,
+                    ), args.inference_n)
+                    for batch_ix, batch in enumerate(tqdm(
+                        # collating into batches just to get a more reliable progress report from tqdm
+                        batched(samples, args.sample_n),
+                        'sampling batches',
+                        disable=not accelerator.is_main_process,
+                        position=batch_tqdm_position,
+                        total=math.ceil(args.inference_n/args.sample_n),
+                        unit='batch',
+                    )):
+                        for ix, sample in enumerate(batch):
+                            corpus_ix: int = args.sample_n*batch_ix + ix
+                            sink_sample(sink, corpus_ix, sample, inference_class)
+                        if accelerator.is_main_process:
+                            tqdm.write(f'batch {batch_ix} {torch.cuda.memory_allocated()/1024**2:.2f}MiB allocated, {torch.cuda.memory_reserved()/1024**2:.2f}MiB reserved of {torch.cuda.get_device_properties(0).total_memory/1024**2:.2f}MiB')
         if accelerator.is_main_process:
             tqdm.write('Finished inferencing!')
         return
