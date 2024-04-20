@@ -236,7 +236,7 @@ def main():
     if args.inference_out_wds_root is not None:
         raise ValueError('You have specified the deprecated option --inference-out-wds-root. Please instead use --inference-out-target wds --inference-out-root [dir] to specify directory into which to output WDS .tar files')
     
-    if args.inference_class is not None:
+    if args.inference_out_foreach_class is not None:
         assert not args.goose_mode, "--goose-mode (which inferences class 99) conflicts with --inference-class (which inferences a list of specified classes). consider switching to --inference-class 99 --inference-out-target [wds or imgdir]"
 
     if args.inference_out_target in ['wds', 'imgdir']:
@@ -715,13 +715,14 @@ def main():
         else:
             sample_gen = torch.Generator('cpu')
             seed_to_ex: int = seed_from + accelerator.num_processes * n_per_proc
-            seeds: LongTensor = torch.arange(seed_from, seed_to_ex).unflatten(dim=-1, sizes=(accelerator.num_processes, n_per_proc))
+            seeds_flat: LongTensor = torch.arange(seed_from, seed_to_ex)
+            seeds_by_proc: LongTensor = seeds_flat.unflatten(dim=-1, sizes=(accelerator.num_processes, n_per_proc))
             x = torch.zeros(world_noise_shape)
-            for proc_ix, proc_seeds in enumerate(seeds.unbind(0)):
+            for proc_ix, proc_seeds in enumerate(seeds_by_proc.unbind(0)):
                 for sample_ix, seed in enumerate(proc_seeds.unbind(0)):
                     torch.randn(sample_noise_shape, out=x[proc_ix, sample_ix], generator=sample_gen.manual_seed(seed.item()))
             x = x.to(device)
-            seeds = seeds[:args.sample_n]
+            seeds = seeds_flat[:args.sample_n]
         dist.broadcast(x, 0)
         x = x[accelerator.process_index] * sigma_max
         model_fn, extra_args = model_ema, {}
@@ -966,7 +967,7 @@ def main():
             has_multiple_inference_classes: bool = len(inference_classes) > 1
             batch_tqdm_position: Literal[0, 1] = int(has_multiple_inference_classes)
             sampling_tqdm_position: Literal[1, 2] = batch_tqdm_position + 1
-            use_class_subdir = bool(inference_class is not None)
+            use_class_subdir = bool(inference_classes is not None)
             if accelerator.is_main_process:
                 makedirs(args.inference_out_root, exist_ok=True)
                 if args.inference_out_target == 'wds':
@@ -979,7 +980,7 @@ def main():
                             ix: int,
                             sample: ClassConditionalSample,
                         ) -> None:
-                            key_dir: str = f'{shard_qualifier}{sample.class_cond}/' if use_class_subdir else shard_qualifier
+                            key_dir: str = f'{shard_qualifier}{sample.class_cond:05d}/' if use_class_subdir else shard_qualifier
                             out: ClassCondSinkOutput = {
                                 '__key__': f'{key_dir}{ix}',
                                 'img.png': sample.pil,
@@ -1004,7 +1005,7 @@ def main():
                 elif args.inference_out_target == 'imgdir':
                     if has_inference_classes:
                         for inference_class in inference_classes:
-                            makedirs(f'{args.inference_out_root}/{inference_class}', exist_ok=True)
+                            makedirs(f'{args.inference_out_root}/{inference_class:05d}', exist_ok=True)
                     sink_ctx = nullcontext()
                     if num_classes:
                         def sink_sample(
@@ -1015,7 +1016,7 @@ def main():
                             seed_qualifier = '' if sample.seed is None else f'.s{sample.seed}'
                             if use_class_subdir:
                                 class_qualifier = ''
-                                img_out_dir: str = f'{args.inference_out_root}/{sample.class_cond}'
+                                img_out_dir: str = f'{args.inference_out_root}/{sample.class_cond:05d}'
                             else:
                                 class_qualifier = f'.c{sample.class_cond}'
                                 img_out_dir: str = args.inference_out_root
