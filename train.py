@@ -1014,12 +1014,8 @@ def main():
                             sample: ClassConditionalSample,
                         ) -> None:
                             seed_qualifier = '' if sample.seed is None else f'.s{sample.seed}'
-                            if use_class_subdir:
-                                class_qualifier = ''
-                                img_out_dir: str = f'{args.inference_out_root}/{sample.class_cond:05d}'
-                            else:
-                                class_qualifier = f'.c{sample.class_cond}'
-                                img_out_dir: str = args.inference_out_root
+                            img_out_dir: str = f'{args.inference_out_root}/{sample.class_cond:05d}' if use_class_subdir else args.inference_out_root
+                            class_qualifier = f'.c{sample.class_cond:05d}'
                             sample.pil.save(f'{img_out_dir}/{ix:05d}{class_qualifier}{seed_qualifier}.png')
                     else:
                         def sink_sample(
