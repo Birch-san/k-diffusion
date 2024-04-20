@@ -30,7 +30,7 @@ from tqdm.auto import tqdm
 from typing import Any, List, Optional, Union, Protocol
 from PIL import Image
 from dataclasses import dataclass
-from typing import Optional, TypedDict, Generator, Callable, Literal, Dict, Any, Protocol
+from typing import Optional, TypedDict, Generator, Callable, Literal, Dict, Any, Protocol, NotRequired
 from contextlib import nullcontext
 from itertools import islice
 from tqdm import tqdm
@@ -59,17 +59,20 @@ from kdiff_trainer.migrations.migrate_model import register_load_hooks, should_d
 SinkOutput = TypedDict('SinkOutput', {
     '__key__': str,
     'img.png': Image.Image,
+    'seed.txt': NotRequired[str],
 })
 
 ClassCondSinkOutput = TypedDict('ClassCondSinkOutput', {
     '__key__': str,
     'img.png': Image.Image,
     'cls.txt': str,
+    'seed.txt': NotRequired[str],
 })
 
 @dataclass
 class Samples:
     x_0: FloatTensor
+    seeds: Optional[LongTensor]
 
 @dataclass
 class ClassConditionalSamples(Samples):
@@ -78,6 +81,7 @@ class ClassConditionalSamples(Samples):
 @dataclass
 class Sample:
     pil: Image.Image
+    seed: Optional[int]
 
 @dataclass
 class ClassConditionalSample(Sample):
@@ -149,6 +153,8 @@ def main():
                    help='[in inference-only mode] how to output images ("grid": single demo grid (like during training) with labels. "imgdir": directory of WDS .tar files. "imgdir": directory of .pngs)')
     p.add_argument('--inference-out-root', type=str, default=None,
                    help='[in inference-only mode] directory into which to output WDS .tar files')
+    p.add_argument('--inference-out-seed-from', type=int, default=None,
+                   help='[in inference-only mode] generate images according to an incrementing seed')
     p.add_argument('--inference-out-foreach-class', type=int, default=None, nargs='*',
                    help='[in inference-only mode] generate --inference-n images per each of the specified class ids')
     p.add_argument('--inference-out-wds-root', type=str, default=None,
@@ -698,9 +704,24 @@ def main():
     
     def generate_batch_of_samples(
         inference_class: Optional[int] = None,
+        seed_from: Optional[int] = None,
     ) -> Samples:
         n_per_proc = math.ceil(args.sample_n / accelerator.num_processes)
-        x = torch.randn([accelerator.num_processes, n_per_proc, model_config['input_channels'], size[0], size[1]], generator=demo_gen).to(device)
+        sample_noise_shape: List[int] = [model_config['input_channels'], size[0], size[1]]
+        world_noise_shape: List[int] = [accelerator.num_processes, n_per_proc, *sample_noise_shape]
+        if seed_from is None:
+            x = torch.randn(world_noise_shape, generator=demo_gen).to(device)
+            seeds: Optional[LongTensor] = None
+        else:
+            sample_gen = torch.Generator('cpu')
+            seed_to_ex: int = seed_from + accelerator.num_processes * n_per_proc
+            seeds: LongTensor = torch.arange(seed_from, seed_to_ex).unflatten(dim=-1, sizes=(accelerator.num_processes, n_per_proc))
+            x = torch.zeros(world_noise_shape)
+            for proc_ix, proc_seeds in enumerate(seeds.unbind(0)):
+                for sample_ix, seed in enumerate(proc_seeds.unbind(0)):
+                    torch.randn(sample_noise_shape, out=x[proc_ix, sample_ix], generator=sample_gen.manual_seed(seed.item()))
+            x = x.to(device)
+            seeds = seeds[:args.sample_n]
         dist.broadcast(x, 0)
         x = x[accelerator.process_index] * sigma_max
         model_fn, extra_args = model_ema, {}
@@ -741,15 +762,16 @@ def main():
             normalizer.inverse_(x_0)
         x_0 = accelerator.gather(x_0)[:args.sample_n]
         if class_cond is None:
-            return Samples(x_0)
+            return Samples(x_0, seeds)
         class_cond = class_cond.flatten(end_dim=1)[:args.sample_n]
-        return ClassConditionalSamples(x_0, class_cond)
+        return ClassConditionalSamples(x_0, seeds, class_cond)
     
     @torch.inference_mode() # note: inference_mode is lower-overhead than no_grad but disables forward-mode AD
     @K.utils.eval_mode(model_ema)
     def generate_samples(
         sampling_tqdm_position: int,
         inference_class: Optional[int],
+        seed_from: Optional[int],
     ) -> Generator[Optional[Sample], None, None]:
         if accelerator.is_main_process:
             tqdm.write('Sampling...')
@@ -758,7 +780,9 @@ def main():
 
         while True:
             with tqdm_environ(TqdmOverrides(position=sampling_tqdm_position)):
-                batch: Samples = generate_batch_of_samples(inference_class=inference_class)
+                batch: Samples = generate_batch_of_samples(inference_class=inference_class, seed_from=seed_from)
+            if seed_from is not None:
+                seed_from += args.sample_n
             # denormalization/scale-and-shift (such as for VAE) was already done inside generate_batch_of_samples()
             if is_latent:
                 # VAE decoder outputs a FloatTensor with range approx ±1
@@ -767,12 +791,13 @@ def main():
                 del decoded
             if accelerator.is_main_process:
                 pils: List[Image.Image] = to_pil_images(batch.x_0)
+                seeds: List[Optional[LongTensor]] = [None]*len(pils) if batch.seeds is None else batch.seeds.unbind()
                 if isinstance(batch, ClassConditionalSamples):
-                    for pil, class_cond in zip(pils, batch.class_cond.unbind()):
-                        yield ClassConditionalSample(pil, class_cond.item())
+                    for pil, seed, class_cond in zip(pils, seeds, batch.class_cond.unbind()):
+                        yield ClassConditionalSample(pil, seed.item(), class_cond.item())
                 else:
-                    for pil in pils:
-                        yield Sample(pil)
+                    for pil, seed in zip(pils, seeds):
+                        yield Sample(pil, seed.item())
                 del pils
             else:
                 yield from [None]*batch.x_0.shape[0]
@@ -941,6 +966,7 @@ def main():
             has_multiple_inference_classes: bool = len(inference_classes) > 1
             batch_tqdm_position: Literal[0, 1] = int(has_multiple_inference_classes)
             sampling_tqdm_position: Literal[1, 2] = batch_tqdm_position + 1
+            use_class_subdir = bool(inference_class is not None)
             if accelerator.is_main_process:
                 makedirs(args.inference_out_root, exist_ok=True)
                 if args.inference_out_target == 'wds':
@@ -952,43 +978,59 @@ def main():
                             sink: ShardWriter,
                             ix: int,
                             sample: ClassConditionalSample,
-                            inference_class: Optional[int],
                         ) -> None:
-                            key_dir: str = shard_qualifier if inference_class is None else f'{shard_qualifier}{inference_class}/'
+                            key_dir: str = f'{shard_qualifier}{sample.class_cond}/' if use_class_subdir else shard_qualifier
                             out: ClassCondSinkOutput = {
                                 '__key__': f'{key_dir}{ix}',
                                 'img.png': sample.pil,
                                 'cls.txt': str(sample.class_cond),
                             }
+                            if sample.seed is not None:
+                                out['seed.txt'] = str(sample.seed)
                             sink.write(out)
                     else:
                         def sink_sample(
                             sink: ShardWriter,
                             ix: int,
                             sample: Sample,
-                            _: None,
                         ) -> None:
                             out: SinkOutput = {
                                 '__key__': f'{shard_qualifier}{ix}',
                                 'img.png': sample.pil,
                             }
+                            if sample.seed is not None:
+                                out['seed.txt'] = str(sample.seed)
                             sink.write(out)
                 elif args.inference_out_target == 'imgdir':
                     if has_inference_classes:
                         for inference_class in inference_classes:
                             makedirs(f'{args.inference_out_root}/{inference_class}', exist_ok=True)
                     sink_ctx = nullcontext()
-                    def sink_sample(
-                        _: None,
-                        ix: int,
-                        sample: Sample,
-                        inference_class: Optional[int],
-                    ) -> None:
-                        img_out_dir: str = args.inference_out_root if inference_class is None else f'{args.inference_out_root}/{inference_class}'
-                        sample.pil.save(f'{img_out_dir}/{ix:05d}.png')
+                    if num_classes:
+                        def sink_sample(
+                            _: None,
+                            ix: int,
+                            sample: ClassConditionalSample,
+                        ) -> None:
+                            seed_qualifier = '' if sample.seed is None else f'.s{sample.seed}'
+                            if use_class_subdir:
+                                class_qualifier = ''
+                                img_out_dir: str = f'{args.inference_out_root}/{sample.class_cond}'
+                            else:
+                                class_qualifier = f'.c{sample.class_cond}'
+                                img_out_dir: str = args.inference_out_root
+                            sample.pil.save(f'{img_out_dir}/{ix:05d}{class_qualifier}{seed_qualifier}.png')
+                    else:
+                        def sink_sample(
+                            _: None,
+                            ix: int,
+                            sample: Sample,
+                        ) -> None:
+                            seed_qualifier = '' if sample.seed is None else f'.s{sample.seed}'
+                            sample.pil.save(f'{args.inference_out_root}/{ix:05d}.{seed_qualifier}.png')
             else:
                 sink_ctx = nullcontext()
-                sink_sample: Callable[[Optional[ShardWriterProto], int, Sample, Optional[int]], None] = lambda *_: ...
+                sink_sample: Callable[[Optional[ShardWriterProto], int, Sample], None] = lambda *_: ...
             # turns out there's a little bit of memory we can get back before we begin
             torch.cuda.empty_cache()
             with sink_ctx as sink:
@@ -1003,6 +1045,7 @@ def main():
                     samples = islice(generate_samples(
                         sampling_tqdm_position=sampling_tqdm_position,
                         inference_class=inference_class,
+                        seed_from=args.inference_out_seed_from,
                     ), args.inference_n)
                     for batch_ix, batch in enumerate(tqdm(
                         # collating into batches just to get a more reliable progress report from tqdm
@@ -1015,7 +1058,7 @@ def main():
                     )):
                         for ix, sample in enumerate(batch):
                             corpus_ix: int = args.sample_n*batch_ix + ix
-                            sink_sample(sink, corpus_ix, sample, inference_class)
+                            sink_sample(sink, corpus_ix, sample)
                         if accelerator.is_main_process:
                             tqdm.write(f'batch {batch_ix} {torch.cuda.memory_allocated()/1024**2:.2f}MiB allocated, {torch.cuda.memory_reserved()/1024**2:.2f}MiB reserved of {torch.cuda.get_device_properties(0).total_memory/1024**2:.2f}MiB')
         if accelerator.is_main_process:
