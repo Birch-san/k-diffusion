@@ -11,6 +11,7 @@ from pathlib import Path
 import time
 from os import makedirs
 from os.path import relpath
+import re
 
 import accelerate
 import safetensors.torch as safetorch
@@ -20,14 +21,14 @@ from torch import distributed as dist
 from torch.nn import MSELoss
 from torch.distributed.fsdp.fully_sharded_data_parallel import FullyShardedDataParallel as FSDP
 from torch import multiprocessing as mp
-from torch import optim, FloatTensor, LongTensor
+from torch import optim, FloatTensor, LongTensor, BoolTensor
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import LRScheduler
 from torch.utils import data
 from torch.utils.data.dataset import Dataset, IterableDataset
 from torchvision import transforms, utils
 from tqdm.auto import tqdm
-from typing import Any, List, Optional, Union, Protocol
+from typing import Any, List, Set, Optional, Union, Protocol, NamedTuple
 from PIL import Image
 from dataclasses import dataclass
 from typing import Optional, TypedDict, Generator, Callable, Literal, Dict, Any, Protocol, NotRequired
@@ -94,6 +95,34 @@ class Sampler(Protocol):
 class ShardWriterProto(Protocol):
     def write(self, obj: Dict[str, Any]) -> None: ...
 
+class ClassAndSeed(NamedTuple):
+    cls: Optional[int]
+    seed: int
+
+def parse_inference_schedule(schedule: str) -> List[ClassAndSeed]:
+    sched: List[ClassAndSeed] = []
+    for condseedline in schedule.split(';'):
+        assert ':' in condseedline, "each (semi-colon delimited) seedline in inference schedule should be a colon-delimited 2-tuple of cond:seeds, where cond is optional."
+        condstr, seedline = condseedline.split(':', maxsplit=1)
+        if condstr == '':
+            cls: Optional[int] = None
+        elif re.match(r'^\d+$', condstr):
+            cls = int(condstr)
+        else:
+            raise ValueError(f'Unsupported cond specification {condstr}. Should either be an integer (the class index) or an empty string.')
+        for seedspan in seedline.split(','):
+            if re.match(r'^\d+$', seedspan):
+                seed = int(seedspan)
+                sched.append(ClassAndSeed(cls, seed))
+            elif re.match(r'^\d+-\d+$', seedspan):
+                start, end = seedspan.split('-', maxsplit=1)
+                start_i, end_i = int(start), int(end)
+                for seed in range(start_i, end_i+1):
+                    sched.append(ClassAndSeed(cls, seed))
+            else:
+                raise ValueError(f'Unsupported seedspan: {seedspan}. Only integers, and ranges (formatted as x-y, where x and y are each integers) are supported')
+    return sched
+
 def ensure_distributed():
     if not dist.is_initialized():
         dist.init_process_group(world_size=1, rank=0, store=dist.HashStore())
@@ -125,8 +154,6 @@ def main():
                    help='save a demo grid every this many steps')
     p.add_argument('--demo-classcond-include-uncond', action='store_true',
                    help='when producing demo grids for class-conditional tasks: allow the generation of uncond demo samples (class chosen from num_classes+1 instead of merely num_classes)')
-    p.add_argument('--goose-mode', action='store_true',
-                   help='very important option for scientists at EleutherAI')
     p.add_argument('--dinov2-model', type=str, default='vitl14',
                    choices=K.evaluation.DINOv2FeatureExtractor.available_models(),
                    help='the DINOv2 model to use to evaluate')
@@ -149,14 +176,18 @@ def main():
                    help='run demo sample instead of training')
     p.add_argument('--inference-n', type=int, default=None,
                    help='[in inference-only mode] the number of samples to generate in total (in batches of up to --sample-n)')
+    p.add_argument('--inference-schedule', type=str, default=None,
+                   help='[in inference-only mode] sample classes and seeds to generate. "0:0,4-6;5:1,3" means: "cond 0 seeds [0,4,5,6] and cond 5 seeds [1,3]". uncond omits the class which precedes the colon, and has no need for semicolons. e.g. ":0,4-6" means "uncond [0,4,5,6]".')
+    p.add_argument('--inference-out-use-class-subdir', action='store_true',
+                   help='whether to output samples to intermediate directory determined by class')
+    p.add_argument('--inference-out-fname-incl-ix', action='store_true',
+                   help='whether filename of samples should include an autoincrementing index')
     p.add_argument('--inference-out-target', type=str, default='grid', choices=['grid', 'wds', 'imgdir'],
                    help='[in inference-only mode] how to output images ("grid": single demo grid (like during training) with labels. "imgdir": directory of WDS .tar files. "imgdir": directory of .pngs)')
     p.add_argument('--inference-out-root', type=str, default=None,
                    help='[in inference-only mode] directory into which to output WDS .tar files')
     p.add_argument('--inference-out-seed-from', type=int, default=None,
                    help='[in inference-only mode] generate images according to an incrementing seed')
-    p.add_argument('--inference-out-foreach-class', type=int, default=None, nargs='*',
-                   help='[in inference-only mode] generate --inference-n images per each of the specified class ids')
     p.add_argument('--inference-out-wds-root', type=str, default=None,
                    help='(deprecated) please instead use --inference-out-target wds --inference-out-root [dir] to specify directory into which to output WDS .tar files')
     p.add_argument('--inference-out-wds-shard', type=int, default=None,
@@ -233,12 +264,12 @@ def main():
     if args.inference_only and args.evaluate_only:
         raise ValueError('Cannot fulfil both --inference-only and --evaluate-only; they are mutually-exclusive')
     
+    if args.inference_schedule is not None and args.inference_n is not None:
+        raise ValueError('Cannot fulfil both --inference-schedule and --inference-n; they are mutually-exclusive')
+    
     if args.inference_out_wds_root is not None:
         raise ValueError('You have specified the deprecated option --inference-out-wds-root. Please instead use --inference-out-target wds --inference-out-root [dir] to specify directory into which to output WDS .tar files')
     
-    if args.inference_out_foreach_class is not None:
-        assert not args.goose_mode, "--goose-mode (which inferences class 99) conflicts with --inference-class (which inferences a list of specified classes). consider switching to --inference-class 99 --inference-out-target [wds or imgdir]"
-
     if args.inference_out_target in ['wds', 'imgdir']:
         # not required for --inference-out-target grid, which mimics the trainer's demo grids and consequently outputs to default trainer output location too.
         # the other modes don't output to default location as you may have other training artifacts there, which may result in a folder with more than just images inside it
@@ -703,26 +734,34 @@ def main():
         return model
     
     def generate_batch_of_samples(
-        inference_class: Optional[int] = None,
-        seed_from: Optional[int] = None,
+        class_seeds: Optional[List[ClassAndSeed]] = None,
     ) -> Samples:
-        n_per_proc = math.ceil(args.sample_n / accelerator.num_processes)
+        if class_seeds is not None:
+            assert len(class_seeds) <= args.sample_n, "please chunk class_seeds before passing it here"
+        req_sample_count: int = args.sample_n if class_seeds is None else min(args.sample_n, len(class_seeds))
+        # if sample count doesn't divide evenly over processes, we round up (which results in some spares)
+        n_per_proc = math.ceil(req_sample_count / accelerator.num_processes)
+        # total number of samples (incl. spares)
+        ceil_sample_count: int = accelerator.num_processes * n_per_proc
         sample_noise_shape: List[int] = [model_config['input_channels'], size[0], size[1]]
         world_noise_shape: List[int] = [accelerator.num_processes, n_per_proc, *sample_noise_shape]
-        if seed_from is None:
+        if class_seeds is None:
             x = torch.randn(world_noise_shape, generator=demo_gen).to(device)
             seeds: Optional[LongTensor] = None
         else:
             sample_gen = torch.Generator('cpu')
-            seed_to_ex: int = seed_from + accelerator.num_processes * n_per_proc
-            seeds_flat: LongTensor = torch.arange(seed_from, seed_to_ex)
+            seeds_: List[int] = [cs.seed for cs in class_seeds]
+            # allocate seeds for any spares that we're forced to generate. value doesn't matter as we will discard.
+            for ix in range(ceil_sample_count-len(seeds_)):
+                seeds_.append(ix)
+            seeds_flat: LongTensor = torch.tensor(seeds_, dtype=torch.long)
             seeds_by_proc: LongTensor = seeds_flat.unflatten(dim=-1, sizes=(accelerator.num_processes, n_per_proc))
             x = torch.zeros(world_noise_shape)
             for proc_ix, proc_seeds in enumerate(seeds_by_proc.unbind(0)):
                 for sample_ix, seed in enumerate(proc_seeds.unbind(0)):
                     torch.randn(sample_noise_shape, out=x[proc_ix, sample_ix], generator=sample_gen.manual_seed(seed.item()))
             x = x.to(device)
-            seeds = seeds_flat[:args.sample_n]
+            seeds = seeds_flat[:req_sample_count]
         dist.broadcast(x, 0)
         x = x[accelerator.process_index] * sigma_max
         model_fn, extra_args = model_ema, {}
@@ -744,11 +783,15 @@ def main():
             extra_args = {**extra_args, **cfg_args.sampling_extra_args}
             model_fn = make_cfg_crossattn_model_fn(model_ema, masked_uncond=masked_uncond, cfg_scale=args.cfg_scale)
         elif num_classes:
-            if args.goose_mode or inference_class is not None:
-                fill_value = 99 if inference_class is None else inference_class
-                class_cond = torch.full([accelerator.num_processes, n_per_proc], fill_value=fill_value, dtype=torch.int64).to(device)
-            else:
-                class_cond = torch.randint(0, num_classes + maybe_uncond_class, [accelerator.num_processes, n_per_proc], generator=demo_gen).to(device)
+            class_cond = torch.randint(0, num_classes + maybe_uncond_class, [accelerator.num_processes, n_per_proc], generator=demo_gen)
+            if class_seeds is not None:
+                # coalesce unspecified classes to -1 so that if our mask scatter has any mistakes: the embedding will complain violently and we'll discover the goof
+                classes: LongTensor = torch.tensor([-1 if cs.cls is None else cs.cls for cs in class_seeds], dtype=torch.long)
+                # False for unspecified classes, which means we will accept the original random value
+                has_class: BoolTensor = torch.tensor([cs.cls is not None for cs in class_seeds], dtype=torch.bool)
+                # replace the rand classes with specified classes only. we slice in case there are spares (and accept original rand value for those).
+                class_cond.flatten()[:classes.size(-1)].masked_scatter_(has_class, classes)
+            class_cond = class_cond.to(device)
             dist.broadcast(class_cond, 0)
             # print ImageNet class labels like so:
             # from kdiff_trainer.dataset_meta.imagenet_1k import class_labels
@@ -761,29 +804,27 @@ def main():
         # adapt from training distribution (e.g. sigma_data=1.0) onto VAE's distribution (if latent) or onto reals distribution
         if normalizer is not None:
             normalizer.inverse_(x_0)
-        x_0 = accelerator.gather(x_0)[:args.sample_n]
+        x_0 = accelerator.gather(x_0)[:req_sample_count]
         if class_cond is None:
             return Samples(x_0, seeds)
-        class_cond = class_cond.flatten(end_dim=1)[:args.sample_n]
+        class_cond = class_cond.flatten(end_dim=1)[:req_sample_count]
         return ClassConditionalSamples(x_0, seeds, class_cond)
     
     @torch.inference_mode() # note: inference_mode is lower-overhead than no_grad but disables forward-mode AD
     @K.utils.eval_mode(model_ema)
     def generate_samples(
-        sampling_tqdm_position: int,
-        inference_class: Optional[int],
-        seed_from: Optional[int],
+        class_seeds: Optional[List[ClassAndSeed]],
     ) -> Generator[Optional[Sample], None, None]:
         if accelerator.is_main_process:
             tqdm.write('Sampling...')
         with FSDP.summon_full_params(model_ema):
             pass
 
-        while True:
-            with tqdm_environ(TqdmOverrides(position=sampling_tqdm_position)):
-                batch: Samples = generate_batch_of_samples(inference_class=inference_class, seed_from=seed_from)
-            if seed_from is not None:
-                seed_from += args.sample_n
+        while class_seeds is None or len(class_seeds):
+            with tqdm_environ(TqdmOverrides(position=1)):
+                batch: Samples = generate_batch_of_samples(class_seeds=class_seeds)
+            if class_seeds is not None:
+                class_seeds = class_seeds[batch.x_0.size(0):]
             # denormalization/scale-and-shift (such as for VAE) was already done inside generate_batch_of_samples()
             if is_latent:
                 # VAE decoder outputs a FloatTensor with range approx ±1
@@ -962,12 +1003,12 @@ def main():
             demo(captioner)
         else:
             assert args.inference_out_target in ['wds', 'imgdir']
-            has_inference_classes: bool = bool(args.inference_out_foreach_class)
-            inference_classes: List[Optional[int]] = args.inference_out_foreach_class if has_inference_classes else [None]
-            has_multiple_inference_classes: bool = len(inference_classes) > 1
-            batch_tqdm_position: Literal[0, 1] = int(has_multiple_inference_classes)
-            sampling_tqdm_position: Literal[1, 2] = batch_tqdm_position + 1
-            use_class_subdir = bool(inference_classes is not None)
+            use_class_subdir = bool(args.inference_out_use_class_subdir)
+            inference_schedule: Optional[List[ClassAndSeed]] = None if args.inference_schedule is None else parse_inference_schedule(args.inference_schedule)
+            if inference_schedule is None:
+                class_subdirs_to_make: Set[int] = set()
+            else:
+                class_subdirs_to_make: Set[int] = {s.cls for s in inference_schedule if s.cls is not None}
             if accelerator.is_main_process:
                 makedirs(args.inference_out_root, exist_ok=True)
                 if args.inference_out_target == 'wds':
@@ -1003,8 +1044,8 @@ def main():
                                 out['seed.txt'] = str(sample.seed)
                             sink.write(out)
                 elif args.inference_out_target == 'imgdir':
-                    if has_inference_classes:
-                        for inference_class in inference_classes:
+                    if use_class_subdir:
+                        for inference_class in class_subdirs_to_make:
                             makedirs(f'{args.inference_out_root}/{inference_class:05d}', exist_ok=True)
                     sink_ctx = nullcontext()
                     if num_classes:
@@ -1015,8 +1056,9 @@ def main():
                         ) -> None:
                             seed_qualifier = '' if sample.seed is None else f'.s{sample.seed}'
                             img_out_dir: str = f'{args.inference_out_root}/{sample.class_cond:05d}' if use_class_subdir else args.inference_out_root
-                            class_qualifier = f'.c{sample.class_cond:05d}'
-                            sample.pil.save(f'{img_out_dir}/{ix:05d}{class_qualifier}{seed_qualifier}.png')
+                            ix_str: str = f'{ix:05d}.' if args.inference_out_fname_incl_ix else ''
+                            class_qualifier = f'c{sample.class_cond:05d}'
+                            sample.pil.save(f'{img_out_dir}/{ix_str}{class_qualifier}{seed_qualifier}.png')
                     else:
                         def sink_sample(
                             _: None,
@@ -1030,34 +1072,25 @@ def main():
                 sink_sample: Callable[[Optional[ShardWriterProto], int, Sample], None] = lambda *_: ...
             # turns out there's a little bit of memory we can get back before we begin
             torch.cuda.empty_cache()
+            inference_n: int = len(inference_schedule) if args.inference_n is None else args.inference_n
             with sink_ctx as sink:
-                inference_classes_it = tqdm(
-                    inference_classes,
-                    'batches per class',
+                samples = islice(generate_samples(
+                    class_seeds=inference_schedule,
+                ), inference_n)
+                for batch_ix, batch in enumerate(tqdm(
+                    # collating into batches just to get a more reliable progress report from tqdm
+                    batched(samples, args.sample_n),
+                    'sampling batches',
                     disable=not accelerator.is_main_process,
                     position=0,
-                    unit='class',
-                ) if has_multiple_inference_classes else inference_classes
-                for inference_class in inference_classes_it:
-                    samples = islice(generate_samples(
-                        sampling_tqdm_position=sampling_tqdm_position,
-                        inference_class=inference_class,
-                        seed_from=args.inference_out_seed_from,
-                    ), args.inference_n)
-                    for batch_ix, batch in enumerate(tqdm(
-                        # collating into batches just to get a more reliable progress report from tqdm
-                        batched(samples, args.sample_n),
-                        'sampling batches',
-                        disable=not accelerator.is_main_process,
-                        position=batch_tqdm_position,
-                        total=math.ceil(args.inference_n/args.sample_n),
-                        unit='batch',
-                    )):
-                        for ix, sample in enumerate(batch):
-                            corpus_ix: int = args.sample_n*batch_ix + ix
-                            sink_sample(sink, corpus_ix, sample)
-                        if accelerator.is_main_process:
-                            tqdm.write(f'batch {batch_ix} {torch.cuda.memory_allocated()/1024**2:.2f}MiB allocated, {torch.cuda.memory_reserved()/1024**2:.2f}MiB reserved of {torch.cuda.get_device_properties(0).total_memory/1024**2:.2f}MiB')
+                    total=math.ceil(inference_n/args.sample_n),
+                    unit='batch',
+                )):
+                    for ix, sample in enumerate(batch):
+                        corpus_ix: int = args.sample_n*batch_ix + ix
+                        sink_sample(sink, corpus_ix, sample)
+                    if accelerator.is_main_process:
+                        tqdm.write(f'batch {batch_ix} {torch.cuda.memory_allocated()/1024**2:.2f}MiB allocated, {torch.cuda.memory_reserved()/1024**2:.2f}MiB reserved of {torch.cuda.get_device_properties(0).total_memory/1024**2:.2f}MiB')
         if accelerator.is_main_process:
             tqdm.write('Finished inferencing!')
         return
