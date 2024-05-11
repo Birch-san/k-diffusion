@@ -808,8 +808,8 @@ def main():
         sigma_min, sigma_max = sigmas[sigmas > 0].min(), sigmas.max()
         noise_sampler: Optional[BrownianTreeNoiseSampler] = None if seeds is None else BrownianTreeNoiseSampler(
             x,
-            sigma_min,
-            sigma_max,
+            sigmas[-2],
+            sigmas[0],
             seed=seeds_by_proc[accelerator.process_index].tolist(),
         )
         x_0: FloatTensor = do_sample(model_fn, x, sigmas, extra_args=extra_args, disable=not accelerator.is_main_process, noise_sampler=noise_sampler)
