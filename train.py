@@ -39,6 +39,7 @@ import numpy as np
 import gc
 
 import k_diffusion as K
+from k_diffusion.sampling import BrownianTreeNoiseSampler
 from kdiff_trainer.dimensions import Dimensions
 from kdiff_trainer.make_default_grid_captioner import make_default_grid_captioner
 from kdiff_trainer.make_captioned_grid import GridCaptioner
@@ -94,6 +95,10 @@ class Sampler(Protocol):
 
 class ShardWriterProto(Protocol):
     def write(self, obj: Dict[str, Any]) -> None: ...
+
+class NoiseSampler(Protocol):
+    @staticmethod
+    def __call__(sigma: float | FloatTensor, sigma_next: float | FloatTensor) -> FloatTensor: ...
 
 class ClassAndSeed(NamedTuple):
     cls: Optional[int]
@@ -709,14 +714,14 @@ def main():
     maybe_uncond_class: Literal[1, 0] = 1 if args.demo_classcond_include_uncond else 0
     
     if args.sampler_preset == 'dpm3':
-        def do_sample(model_fn: Callable, x: FloatTensor, sigmas: FloatTensor, extra_args: Dict[str, Any], disable: bool) -> FloatTensor:
-            return K.sampling.sample_dpmpp_3m_sde(model_fn, x, sigmas, extra_args=extra_args, eta=1.0, disable=disable)
+        def do_sample(model_fn: Callable, x: FloatTensor, sigmas: FloatTensor, extra_args: Dict[str, Any], disable: bool, noise_sampler: Optional[NoiseSampler] = None) -> FloatTensor:
+            return K.sampling.sample_dpmpp_3m_sde(model_fn, x, sigmas, extra_args=extra_args, eta=1.0, disable=disable, noise_sampler=noise_sampler)
     elif args.sampler_preset == 'dpm2':
-        def do_sample(model_fn: Callable, x: FloatTensor, sigmas: FloatTensor, extra_args: Dict[str, Any], disable: bool) -> FloatTensor:
-            return K.sampling.sample_dpmpp_2m_sde(model_fn, x, sigmas, extra_args=extra_args, eta=0.0, solver_type='heun', disable=disable)
+        def do_sample(model_fn: Callable, x: FloatTensor, sigmas: FloatTensor, extra_args: Dict[str, Any], disable: bool, noise_sampler: Optional[NoiseSampler] = None) -> FloatTensor:
+            return K.sampling.sample_dpmpp_2m_sde(model_fn, x, sigmas, extra_args=extra_args, eta=0.0, solver_type='heun', disable=disable, noise_sampler=noise_sampler)
     elif args.sampler_preset == 'ddpm':
-        def do_sample(model_fn: Callable, x: FloatTensor, sigmas: FloatTensor, extra_args: Dict[str, Any], disable: bool) -> FloatTensor:
-            return K.sampling.sample_euler_ancestral(model_fn, x, sigmas, extra_args=extra_args, eta=1.0, disable=disable)
+        def do_sample(model_fn: Callable, x: FloatTensor, sigmas: FloatTensor, extra_args: Dict[str, Any], disable: bool, noise_sampler: Optional[NoiseSampler] = None) -> FloatTensor:
+            return K.sampling.sample_euler_ancestral(model_fn, x, sigmas, extra_args=extra_args, eta=1.0, disable=disable, noise_sampler=noise_sampler)
     else:
         raise ValueError(f"Unsupported sampler_preset: '{args.sampler_preset}'")
 
@@ -800,7 +805,14 @@ def main():
             model_fn = make_cfg_model_fn(model_ema)
         sigmas = K.sampling.get_sigmas_karras(args.demo_steps, sigma_min, sigma_max, rho=7., device=device)
 
-        x_0: FloatTensor = do_sample(model_fn, x, sigmas, extra_args=extra_args, disable=not accelerator.is_main_process)
+        sigma_min, sigma_max = sigmas[sigmas > 0].min(), sigmas.max()
+        noise_sampler: Optional[BrownianTreeNoiseSampler] = None if seeds is None else BrownianTreeNoiseSampler(
+            x,
+            sigma_min,
+            sigma_max,
+            seed=seeds_by_proc[accelerator.process_index].tolist(),
+        )
+        x_0: FloatTensor = do_sample(model_fn, x, sigmas, extra_args=extra_args, disable=not accelerator.is_main_process, noise_sampler=noise_sampler)
         # adapt from training distribution (e.g. sigma_data=1.0) onto VAE's distribution (if latent) or onto reals distribution
         if normalizer is not None:
             normalizer.inverse_(x_0)
