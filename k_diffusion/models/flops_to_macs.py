@@ -1,7 +1,6 @@
 import torch
 from torch.utils.flop_counter import (
   get_shape,
-  transpose_shape,
   mm_flop,
   bmm_flop,
   conv_flop_count,
@@ -48,6 +47,10 @@ def conv_mac(x_shape, w_shape, _bias, _stride, _padding, _dilation, transposed, 
   """Count flops for convolution."""
   return conv_mac_count(x_shape, w_shape, out_shape, transposed=transposed)
 
+# https://github.com/pytorch/pytorch/pull/119874
+def t(shape):
+  return [shape[1], shape[0]] + list(shape[2:])
+
 def conv_backward_mac(
   grad_out_shape,
   x_shape,
@@ -69,7 +72,10 @@ def conv_backward_mac(
     mac_count += conv_mac_count(grad_out_shape, w_shape, grad_input_shape, not transposed)
   if output_mask[1]:
     grad_weight_shape = get_shape(out_shape[1])
-    mac_count += conv_mac_count(transpose_shape(x_shape), grad_out_shape, grad_weight_shape, transposed)
+    if transposed:
+      mac_count += conv_mac_count(t(grad_out_shape), t(x_shape), t(grad_weight_shape), transposed=False)
+    else:
+      mac_count += conv_mac_count(t(x_shape), t(grad_out_shape), t(grad_weight_shape), transposed=False)
 
   return mac_count
 
