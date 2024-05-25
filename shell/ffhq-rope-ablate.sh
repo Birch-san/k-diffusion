@@ -6,7 +6,7 @@ python train.py \
 configs/ffhq/config_FFHQ_256px_rope.jsonc \
 --out-root out \
 --output-to-subdir \
---name ffhq-256-rope \
+--name ffhq-256-rope-b40 \
 --evaluate-n 0 \
 --batch-size 40 \
 --demo-every 500 \
@@ -20,14 +20,14 @@ configs/ffhq/config_FFHQ_256px_rope.jsonc \
 --start-method fork \
 --wandb-project hdit-ffhq-256 \
 --wandb-entity mahouko \
---wandb-run-name ffhq-256-rope
+--wandb-run-name ffhq-256-rope-b40
 
 python train.py \
 --config \
 configs/ffhq/config_FFHQ_256px_additive.jsonc \
 --out-root out \
 --output-to-subdir \
---name ffhq-256-additive \
+--name ffhq-256-additive-b40 \
 --evaluate-n 0 \
 --batch-size 40 \
 --demo-every 500 \
@@ -41,4 +41,4 @@ configs/ffhq/config_FFHQ_256px_additive.jsonc \
 --start-method fork \
 --wandb-project hdit-ffhq-256 \
 --wandb-entity mahouko \
---wandb-run-name ffhq-256-additive
+--wandb-run-name ffhq-256-additive-b40
