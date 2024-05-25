@@ -805,7 +805,6 @@ def main():
             model_fn = make_cfg_model_fn(model_ema)
         sigmas = K.sampling.get_sigmas_karras(args.demo_steps, sigma_min, sigma_max, rho=7., device=device)
 
-        sigma_min, sigma_max = sigmas[sigmas > 0].min(), sigmas.max()
         noise_sampler: Optional[BrownianTreeNoiseSampler] = None if seeds is None else BrownianTreeNoiseSampler(
             x,
             sigmas[-2],
