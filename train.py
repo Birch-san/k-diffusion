@@ -191,8 +191,6 @@ def main():
                    help='[in inference-only mode] how to output images ("grid": single demo grid (like during training) with labels. "imgdir": directory of WDS .tar files. "imgdir": directory of .pngs)')
     p.add_argument('--inference-out-root', type=str, default=None,
                    help='[in inference-only mode] directory into which to output WDS .tar files')
-    p.add_argument('--inference-out-seed-from', type=int, default=None,
-                   help='[in inference-only mode] generate images according to an incrementing seed')
     p.add_argument('--inference-out-wds-root', type=str, default=None,
                    help='(deprecated) please instead use --inference-out-target wds --inference-out-root [dir] to specify directory into which to output WDS .tar files')
     p.add_argument('--inference-out-wds-shard', type=int, default=None,
