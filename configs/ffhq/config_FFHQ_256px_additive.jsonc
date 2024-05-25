@@ -4,7 +4,7 @@
     "input_channels": 3,
     "input_size": [256, 256],
     "patch_size": [4, 4],
-    "depths": [2, 2, 2],
+    "depths": [2, 2, 4],
     "widths": [384, 768, 1024],
     "self_attns": [
       {"type": "neighborhood", "d_head": 64},
